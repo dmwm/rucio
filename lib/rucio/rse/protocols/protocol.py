@@ -26,6 +26,7 @@
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2019
 # - James Clark <james.clark@physics.gatech.edu>, 2019
 # - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
+# - Eli Chadwick, <eli.chadwick@stfc.ac.uk>, 2020
 #
 # PY3K COMPATIBLE
 
@@ -35,6 +36,7 @@ along with some of the default methods for LFN2PFN translations.
 """
 
 import hashlib
+import logging
 
 try:
     # PY2
@@ -55,6 +57,7 @@ if getattr(rsemanager, 'CLIENT_MODE', None):
 if getattr(rsemanager, 'SERVER_MODE', None):
     from rucio.common.types import InternalScope
     from rucio.core import replica
+    from rucio.core.rse import get_rse_vo
 
 
 class RSEDeterministicTranslation(object):
@@ -226,6 +229,9 @@ class RSEDeterministicTranslation(object):
 
             :returns: RSE specific URI of the physical file
         """
+        # ensure that policy package is loaded in case it registers algorithms
+        import rucio.common.schema  # noqa: F401
+
         algorithm = self.rse_attributes.get('lfn2pfn_algorithm', 'default')
         if algorithm == 'default':
             algorithm = RSEDeterministicTranslation._DEFAULT_LFN2PFN
@@ -239,16 +245,19 @@ RSEDeterministicTranslation._module_init_()  # pylint: disable=protected-access
 class RSEProtocol(object):
     """ This class is virtual and acts as a base to inherit new protocols from. It further provides some common functionality which applies for the amjority of the protocols."""
 
-    def __init__(self, protocol_attr, rse_settings):
+    def __init__(self, protocol_attr, rse_settings, logger=None):
         """ Initializes the object with information about the referred RSE.
 
             :param props: Properties of the requested protocol
         """
+        self.auth_token = protocol_attr['auth_token']
+        protocol_attr.pop('auth_token')
         self.attributes = protocol_attr
         self.translator = None
         self.renaming = True
         self.overwrite = False
         self.rse = rse_settings
+        self.logger = logger
         if self.rse['deterministic']:
             self.translator = RSEDeterministicTranslation(self.rse['rse'], rse_settings, self.attributes)
             if getattr(rsemanager, 'CLIENT_MODE', None) and \
@@ -260,6 +269,9 @@ class RSEProtocol(object):
                 setattr(self, 'lfns2pfns', self.__lfns2pfns_client)
             if getattr(rsemanager, 'SERVER_MODE', None):
                 setattr(self, '_get_path', self._get_path_nondeterministic_server)
+        if not self.logger:
+            self.logger = logging.getLogger('%s.null' % __name__)
+            self.logger.disabled = True
 
     def lfns2pfns(self, lfns):
         """
@@ -327,7 +339,8 @@ class RSEProtocol(object):
 
     def _get_path_nondeterministic_server(self, scope, name):  # pylint: disable=invalid-name
         """ Provides the path of a replica for non-deterministic sites. Will be assigned to get path by the __init__ method if neccessary. """
-        scope = InternalScope(scope)
+        vo = get_rse_vo(self.rse['id'])
+        scope = InternalScope(scope, vo=vo)
         rep = replica.get_replica(scope=scope, name=name, rse_id=self.rse['id'])
         if 'path' in rep and rep['path'] is not None:
             path = rep['path']

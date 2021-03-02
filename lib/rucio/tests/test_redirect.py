@@ -1,4 +1,4 @@
-# Copyright 2014-2018 CERN for the benefit of the ATLAS collaboration.
+# Copyright 2014-2020 CERN for the benefit of the ATLAS collaboration.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,22 +13,30 @@
 # limitations under the License.
 #
 # Authors:
-# - Vincent Garonne <vgaronne@gmail.com>, 2014-2018
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2014-2018
 # - Mario Lassnig <mario.lassnig@cern.ch>, 2014-2017
 # - Cedric Serfon <cedric.serfon@cern.ch>, 2017
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
+# - Patrick Austin <patrick.austin@stfc.ac.uk>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
-from nose.tools import assert_in
+import unittest
 
 from rucio.client.baseclient import BaseClient
 from rucio.client.replicaclient import ReplicaClient
-from rucio.common.config import config_get
+from rucio.common.config import config_get, config_get_bool
 from rucio.common.utils import generate_uuid
 from rucio.tests.common import execute
 
 
-class TestReplicaHeaderRedirection:
+class TestReplicaHeaderRedirection(unittest.TestCase):
 
-    def __init__(self):
+    def setUp(self):
+        if config_get_bool('common', 'multi_vo', raise_exception=False, default=False):
+            self.vo_header = '-H "X-Rucio-VO: %s"' % config_get('client', 'vo', raise_exception=False, default='tst')
+        else:
+            self.vo_header = ''
+
         self.cacert = config_get('test', 'cacert')
         self.host = config_get('client', 'rucio_host')
         self.auth_host = config_get('client', 'auth_host')
@@ -41,13 +49,14 @@ class TestReplicaHeaderRedirection:
         """ REDIRECT: header to replica"""
         tmp_scope = 'mock'
         tmp_name = 'file_%s' % generate_uuid()
-        cmd = 'curl -s -i --cacert %s -H "X-Rucio-Auth-Token: %s" -X GET %s/redirect/%s/%s''' % (self.cacert,
-                                                                                                 self.token,
-                                                                                                 self.host,
-                                                                                                 tmp_scope,
-                                                                                                 tmp_name)
+        cmd = 'curl -s -i --cacert %s -H "X-Rucio-Auth-Token: %s" %s -X GET %s/redirect/%s/%s''' % (self.cacert,
+                                                                                                    self.token,
+                                                                                                    self.vo_header,
+                                                                                                    self.host,
+                                                                                                    tmp_scope,
+                                                                                                    tmp_name)
         _, out, _ = execute(cmd)
-        assert_in('404 Not Found', out)
+        assert '404 Not Found'.lower() in out.lower()
 
         self.replica_client.add_replicas(rse='MOCK', files=[{'scope': tmp_scope,
                                                              'name': tmp_name,
@@ -58,13 +67,18 @@ class TestReplicaHeaderRedirection:
                                                               'bytes': 1,
                                                               'adler32': '0cc737eb'}])
         _, out, _ = execute(cmd)
-        assert_in('303 See Other', out)
-        assert_in('Location: https://mock', out)
+        assert '303 See Other'.lower() in out.lower()
+        assert 'Location: https://mock' in out
 
 
-class TestReplicaMetalinkRedirection:
+class TestReplicaMetalinkRedirection(unittest.TestCase):
 
-    def __init__(self):
+    def setUp(self):
+        if config_get_bool('common', 'multi_vo', raise_exception=False, default=False):
+            self.vo_header = '-H "X-Rucio-VO: %s"' % config_get('client', 'vo', raise_exception=False, default='tst')
+        else:
+            self.vo_header = ''
+
         self.cacert = config_get('test', 'cacert')
         self.host = config_get('client', 'rucio_host')
         self.auth_host = config_get('client', 'auth_host')
@@ -77,13 +91,14 @@ class TestReplicaMetalinkRedirection:
         """ REDIRECT: metalink to replica"""
         tmp_scope = 'mock'
         tmp_name = 'file_%s' % generate_uuid()
-        cmd = 'curl -s -i --cacert %s -H "X-Rucio-Auth-Token: %s" -X GET %s/redirect/%s/%s''' % (self.cacert,
-                                                                                                 self.token,
-                                                                                                 self.host,
-                                                                                                 tmp_scope,
-                                                                                                 tmp_name)
+        cmd = 'curl -s -i --cacert %s -H "X-Rucio-Auth-Token: %s" %s -X GET %s/redirect/%s/%s' % (self.cacert,
+                                                                                                  self.token,
+                                                                                                  self.vo_header,
+                                                                                                  self.host,
+                                                                                                  tmp_scope,
+                                                                                                  tmp_name)
         _, out, _ = execute(cmd)
-        assert_in('404 Not Found', out)
+        assert '404 Not Found'.lower() in out.lower()
 
         self.replica_client.add_replicas(rse='MOCK', files=[{'scope': tmp_scope,
                                                              'name': tmp_name,
@@ -94,18 +109,18 @@ class TestReplicaMetalinkRedirection:
                                                               'bytes': 1,
                                                               'adler32': '0cc737eb'}])
         _, out, _ = execute(cmd)
-        assert_in('303 See Other', out)
-        assert_in('Link: </redirect/%s/%s/metalink' % (tmp_scope,
-                                                       tmp_name), out)
+        assert '303 See Other'.lower() in out.lower()
+        assert 'Link: </redirect/%s/%s/metalink' % (tmp_scope, tmp_name) in out
 
-        cmd = 'curl -s -i --cacert %s -H "X-Rucio-Auth-Token: %s" -X GET %s/redirect/%s/%s/metalink''' % (self.cacert,
-                                                                                                          self.token,
-                                                                                                          self.host,
-                                                                                                          tmp_scope,
-                                                                                                          tmp_name)
+        cmd = 'curl -s -i --cacert %s -H "X-Rucio-Auth-Token: %s" %s -X GET %s/redirect/%s/%s/metalink' % (self.cacert,
+                                                                                                           self.token,
+                                                                                                           self.vo_header,
+                                                                                                           self.host,
+                                                                                                           tmp_scope,
+                                                                                                           tmp_name)
         _, out, _ = execute(cmd)
-        assert_in('200 OK', out)
-        assert_in('<?xml', out)
-        assert_in('<metalink', out)
-        assert_in('<url location="MOCK"', out)
-        assert_in('<url location="MOCK3"', out)
+        assert '200 OK'.lower() in out.lower()
+        assert '<?xml' in out
+        assert '<metalink' in out
+        assert '<url location="MOCK"' in out
+        assert '<url location="MOCK3"' in out

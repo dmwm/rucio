@@ -1,4 +1,5 @@
-# Copyright 2013-2018 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2013-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,12 +15,12 @@
 #
 # Authors:
 # - Martin Barisits <martin.barisits@cern.ch>, 2013-2016
-# - Vincent Garonne <vgaronne@gmail.com>, 2014-2018
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2014-2018
 # - Mario Lassnig <mario.lassnig@cern.ch>, 2014-2015
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
-# - Brandon White <bjwhite@fnal.gov>, 2019-2020
-#
-# PY3K COMPATIBLE
+# - Brandon White <bjwhite@fnal.gov>, 2019
+# - Thomas Beermann <thomas.beermann@cern.ch>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
 """
 Judge-Repairer is a daemon to repair stuck replication rules.
@@ -32,19 +33,20 @@ import sys
 import threading
 import time
 import traceback
-
 from copy import deepcopy
 from datetime import datetime, timedelta
-from re import match
 from random import randint
+from re import match
 
 from sqlalchemy.exc import DatabaseError
 
+import rucio.db.sqla.util
+from rucio.common import exception
 from rucio.common.config import config_get
 from rucio.common.exception import DatabaseException
 from rucio.core.heartbeat import live, die, sanity_check
-from rucio.core.rule import repair_rule, get_stuck_rules
 from rucio.core.monitor import record_counter
+from rucio.core.rule import repair_rule, get_stuck_rules
 
 graceful_stop = threading.Event()
 
@@ -68,13 +70,14 @@ def rule_repairer(once=False):
     paused_rules = {}  # {rule_id: datetime}
 
     # Make an initial heartbeat so that all judge-repairers have the correct worker number on the next try
-    live(executable='rucio-judge-repairer', hostname=hostname, pid=pid, thread=current_thread, older_than=60 * 30)
+    executable = 'judge-repairer'
+    live(executable=executable, hostname=hostname, pid=pid, thread=current_thread, older_than=60 * 30)
     graceful_stop.wait(1)
 
     while not graceful_stop.is_set():
         try:
             # heartbeat
-            heartbeat = live(executable='rucio-judge-repairer', hostname=hostname, pid=pid, thread=current_thread, older_than=60 * 30)
+            heartbeat = live(executable=executable, hostname=hostname, pid=pid, thread=current_thread, older_than=60 * 30)
 
             start = time.time()
 
@@ -90,6 +93,7 @@ def rule_repairer(once=False):
                                     delta=-1 if once else 1800,
                                     limit=100,
                                     blacklisted_rules=[key for key in paused_rules])
+
             logging.debug('rule_repairer[%s/%s] index query time %f fetch size is %d' % (heartbeat['assign_thread'], heartbeat['nr_threads'], time.time() - start, len(rules)))
 
             if not rules and not once:
@@ -136,7 +140,7 @@ def rule_repairer(once=False):
         if once:
             break
 
-    die(executable='rucio-judge-repairer', hostname=hostname, pid=pid, thread=current_thread)
+    die(executable=executable, hostname=hostname, pid=pid, thread=current_thread)
 
 
 def stop(signum=None, frame=None):
@@ -151,9 +155,12 @@ def run(once=False, threads=1):
     """
     Starts up the Judge-Repairer threads.
     """
+    if rucio.db.sqla.util.is_old_db():
+        raise exception.DatabaseException('Database was not updated, daemon won\'t start')
 
+    executable = 'judge-repairer'
     hostname = socket.gethostname()
-    sanity_check(executable='rucio-judge-repairer', hostname=hostname)
+    sanity_check(executable=executable, hostname=hostname)
 
     if once:
         rule_repairer(once)

@@ -1,4 +1,5 @@
-# Copyright 2013-2018 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2013-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,41 +17,45 @@
 # - Vincent Garonne <vgaronne@gmail.com>, 2013-2018
 # - Cedric Serfon <cedric.serfon@cern.ch>, 2013-2020
 # - Ralph Vigne <ralph.vigne@cern.ch>, 2013
-# - Mario Lassnig <mario.lassnig@cern.ch>, 2014
+# - Mario Lassnig <mario.lassnig@cern.ch>, 2014-2018
 # - Tomas Kouba <tomas.kouba@cern.ch>, 2015
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018
-#
-# PY3K COMPATIBLE
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
+# - Brandon White <bjwhite@fnal.gov>, 2019
+# - Cedric Serfon <cedric.serfon@cern.ch>, 2020
+# - Eli Chadwick <eli.chadwick@stfc.ac.uk>, 2020
+# - Patrick Austin <patrick.austin@stfc.ac.uk>, 2020
+# - Thomas Beermann <thomas.beermann@cern.ch>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
 from __future__ import division
 from __future__ import print_function
 
 import logging
-import socket
 import random
+import socket
 import tempfile
 import threading
 import traceback
-
 from datetime import datetime
 from json import load
 from math import exp
 from os import remove, rmdir, stat, getpid
-from sys import stdout, argv
+from sys import stdout
 from time import sleep, time
 
+import rucio.db.sqla.util
 from rucio.client import Client
+from rucio.common import exception
 from rucio.common.config import config_get
-from rucio.common.utils import adler32
-from rucio.core.config import get
-from rucio.core import monitor, heartbeat
-from rucio.rse import rsemanager as rsemgr
-from rucio.core.scope import list_scopes
-from rucio.common.types import InternalScope
-
-from rucio.common.utils import execute, generate_uuid
 from rucio.common.exception import FileReplicaAlreadyExists, ConfigNotFound
-
+from rucio.common.types import InternalScope
+from rucio.common.utils import adler32
+from rucio.common.utils import execute, generate_uuid
+from rucio.core import monitor, heartbeat
+from rucio.core.config import get
+from rucio.core.scope import list_scopes
+from rucio.rse import rsemanager as rsemgr
 
 logging.basicConfig(stream=stdout,
                     level=getattr(logging,
@@ -91,7 +96,7 @@ def upload(files, scope, metadata, rse, account, source_dir, worker_number, tota
 
     # Physical upload
     logging.info('%s Uploading physically the files %s on %s', prepend_str, str(lfns), rse)
-    rse_info = rsemgr.get_rse_info(rse)
+    rse_info = rsemgr.get_rse_info(rse, vo=client.vo)
     try:
         success_upload = True
         for cnt in range(0, 3):
@@ -217,7 +222,7 @@ def generate_didname(metadata, dsn, did_type):
 def automatix(sites, inputfile, sleep_time, account, worker_number=1, total_workers=1, scope='tests', once=False, dataset_lifetime=None, set_metadata=False):
     sleep(sleep_time * (total_workers - worker_number) / total_workers)
 
-    executable = ' '.join(argv)
+    executable = 'automatix'
     hostname = socket.getfqdn()
     pid = getpid()
     hb_thread = threading.current_thread()
@@ -296,6 +301,9 @@ def run(total_workers=1, once=False, inputfile=None):
     """
     Starts up the automatix threads.
     """
+    if rucio.db.sqla.util.is_old_db():
+        raise exception.DatabaseException('Database was not updated, daemon won\'t start')
+
     try:
         sites = [s.strip() for s in get('automatix', 'sites').split(',')]
     except Exception:
@@ -321,7 +329,9 @@ def run(total_workers=1, once=False, inputfile=None):
 
     try:
         scope = get('automatix', 'scope')
-        if InternalScope(scope) not in list_scopes():
+        client = Client()
+        filters = {'scope': InternalScope('*', vo=client.vo)}
+        if InternalScope(scope, vo=client.vo) not in list_scopes(filter=filters):
             logging.error('Scope %s does not exist. Exiting', scope)
             GRACEFUL_STOP.set()
     except Exception:

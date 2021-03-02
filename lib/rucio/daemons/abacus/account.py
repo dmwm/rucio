@@ -1,4 +1,5 @@
-# Copyright 2014-2018 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2014-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,12 +14,12 @@
 # limitations under the License.
 #
 # Authors:
-# - Martin Barisits <martin.barisits@cern.ch>, 2014-2016
-# - Vincent Garonne <vgaronne@gmail.com>, 2014-2018
+# - Martin Barisits <martin.barisits@cern.ch>, 2014-2019
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2014-2018
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
-# - Brandon White <bjwhite@fnal.gov>, 2019-2020
-#
-# PY3K COMPATIBLE
+# - Brandon White <bjwhite@fnal.gov>, 2019
+# - Thomas Beermann <thomas.beermann@cern.ch>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
 """
 Abacus-Account is a daemon to update Account counters.
@@ -32,10 +33,12 @@ import threading
 import time
 import traceback
 
+import rucio.db.sqla.util
+from rucio.common import exception
 from rucio.common.config import config_get
 from rucio.common.utils import get_thread_with_periodic_running_function
-from rucio.core.heartbeat import live, die, sanity_check
 from rucio.core.account_counter import get_updated_account_counters, update_account_counter, fill_account_counter_history_table
+from rucio.core.heartbeat import live, die, sanity_check
 
 graceful_stop = threading.Event()
 
@@ -57,15 +60,16 @@ def account_update(once=False):
     logging.info('account_update: started')
 
     # Make an initial heartbeat so that all abacus-account daemons have the correct worker number on the next try
+    executable = 'abacus-account'
     hostname = socket.gethostname()
     pid = os.getpid()
     current_thread = threading.current_thread()
-    live(executable='rucio-abacus-account', hostname=hostname, pid=pid, thread=current_thread)
+    live(executable=executable, hostname=hostname, pid=pid, thread=current_thread)
 
     while not graceful_stop.is_set():
         try:
             # Heartbeat
-            heartbeat = live(executable='rucio-abacus-account', hostname=hostname, pid=pid, thread=current_thread)
+            heartbeat = live(executable=executable, hostname=hostname, pid=pid, thread=current_thread)
 
             # Select a bunch of rses for to update for this worker
             start = time.time()  # NOQA
@@ -91,7 +95,7 @@ def account_update(once=False):
             break
 
     logging.info('account_update: graceful stop requested')
-    die(executable='rucio-abacus-account', hostname=hostname, pid=pid, thread=current_thread)
+    die(executable=executable, hostname=hostname, pid=pid, thread=current_thread)
     logging.info('account_update: graceful stop done')
 
 
@@ -107,8 +111,12 @@ def run(once=False, threads=1, fill_history_table=False):
     """
     Starts up the Abacus-Account threads.
     """
+    if rucio.db.sqla.util.is_old_db():
+        raise exception.DatabaseException('Database was not updated, daemon won\'t start')
+
+    executable = 'abacus-account'
     hostname = socket.gethostname()
-    sanity_check(executable='rucio-abacus-account', hostname=hostname)
+    sanity_check(executable=executable, hostname=hostname)
 
     if once:
         logging.info('main: executing one iteration only')

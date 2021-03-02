@@ -1,4 +1,5 @@
-# Copyright 2013-2018 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2018-2021 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,10 +15,14 @@
 #
 # Authors:
 # - Cedric Serfon <cedric.serfon@cern.ch>, 2018-2019
+# - Martin Barisits <martin.barisits@cern.ch>, 2018-2019
 # - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
-# - Brandon White <bjwhite@fnal.gov>, 2019-2020
-#
-# PY3K COMPATIBLE
+# - Brandon White <bjwhite@fnal.gov>, 2019
+# - Thomas Beermann <thomas.beermann@cern.ch>, 2020
+# - Patrick Austin <patrick.austin@stfc.ac.uk>, 2020
+# - Eli Chadwick <eli.chadwick@stfc.ac.uk>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
+# - Dimitrios Christidis <dimitrios.christidis@cern.ch>, 2021
 
 from __future__ import division
 
@@ -25,27 +30,24 @@ import logging
 import math
 import os
 import socket
-import traceback
 import threading
 import time
-
+import traceback
 from datetime import datetime
-from sys import stdout, argv
+from sys import stdout
 
-from rucio.db.sqla.constants import BadFilesStatus, BadPFNStatus, ReplicaState
-
-from rucio.db.sqla.session import get_session
+import rucio.db.sqla.util
 from rucio.common.config import config_get
+from rucio.common.exception import UnsupportedOperation, DataIdentifierNotFound, ReplicaNotFound, DatabaseException
 from rucio.common.utils import chunks
-from rucio.common.exception import UnsupportedOperation, DataIdentifierNotFound, ReplicaNotFound
+from rucio.core import heartbeat
 from rucio.core.did import get_metadata
 from rucio.core.replica import (get_bad_pfns, get_pfn_to_rse, declare_bad_file_replicas,
                                 get_did_from_pfns, update_replicas_states, bulk_add_bad_replicas,
                                 bulk_delete_bad_pfns, get_replicas_state)
 from rucio.core.rse import get_rse_name
-
-from rucio.core import heartbeat
-
+from rucio.db.sqla.constants import BadFilesStatus, BadPFNStatus, ReplicaState
+from rucio.db.sqla.session import get_session
 
 logging.basicConfig(stream=stdout,
                     level=getattr(logging,
@@ -68,7 +70,7 @@ def minos(bulk=1000, once=False, sleep_time=60):
     :param sleep_time: Time between two cycles.
     """
 
-    executable = ' '.join(argv)
+    executable = 'minos'
     hostname = socket.getfqdn()
     pid = os.getpid()
     hb_thread = threading.current_thread()
@@ -106,12 +108,12 @@ def minos(bulk=1000, once=False, sleep_time=60):
                 account = pfn['account']
                 reason = pfn['reason']
                 expires_at = pfn['expires_at']
-                state = pfn['state']
-                if states_mapping[state] in [BadFilesStatus.BAD, BadFilesStatus.SUSPICIOUS]:
+                state = states_mapping[pfn['state']]
+                if state in [BadFilesStatus.BAD, BadFilesStatus.SUSPICIOUS]:
                     if (account, reason, state) not in bad_replicas:
                         bad_replicas[(account, reason, state)] = []
                     bad_replicas[(account, reason, state)].append(path)
-                if states_mapping[state] == BadFilesStatus.TEMPORARY_UNAVAILABLE:
+                elif state == BadFilesStatus.TEMPORARY_UNAVAILABLE:
                     if (account, reason, expires_at) not in temporary_unvailables:
                         temporary_unvailables[(account, reason, expires_at)] = []
                     temporary_unvailables[(account, reason, expires_at)].append(path)
@@ -119,6 +121,7 @@ def minos(bulk=1000, once=False, sleep_time=60):
             # Process the bad and suspicious files
             # The scope, name, rse_id are extracted and filled into the bad_replicas table
             for account, reason, state in bad_replicas:
+                vo = account.vo
                 pfns = bad_replicas[(account, reason, state)]
                 logging.info(prepend_str + 'Declaring %s replicas with state %s and reason %s' % (len(pfns), str(state), reason))
                 session = get_session()
@@ -133,19 +136,20 @@ def minos(bulk=1000, once=False, sleep_time=60):
                             schemes[scheme] = []
                         schemes[scheme].append(pfn)
                     for scheme in schemes:
-                        _, tmp_dict_rse, tmp_unknown_replicas = get_pfn_to_rse(schemes[scheme])
+                        _, tmp_dict_rse, tmp_unknown_replicas = get_pfn_to_rse(schemes[scheme], vo=vo)
                         for rse_id in tmp_dict_rse:
                             if rse_id not in dict_rse:
                                 dict_rse[rse_id] = []
                             dict_rse[rse_id].extend(tmp_dict_rse[rse_id])
-                            unknown_replicas.extend(tmp_unknown_replicas.get('unknown', []))
+                        unknown_replicas.extend(tmp_unknown_replicas.get('unknown', []))
                     # The replicas in unknown_replicas do not exist, so we flush them from bad_pfns
                     if unknown_replicas:
                         logging.info(prepend_str + 'The following replicas are unknown and will be removed : %s' % str(unknown_replicas))
                         bulk_delete_bad_pfns(pfns=unknown_replicas, session=None)
 
                     for rse_id in dict_rse:
-                        logging.debug(prepend_str + 'Running on RSE %s with %s replicas' % (get_rse_name(rse_id=rse_id), len(dict_rse[rse_id])))
+                        vo_str = '' if vo == 'def' else ' on VO ' + vo
+                        logging.debug(prepend_str + 'Running on RSE %s%s with %s replicas' % (get_rse_name(rse_id=rse_id), vo_str, len(dict_rse[rse_id])))
                         nchunk = 0
                         tot_chunk = int(math.ceil(len(dict_rse[rse_id]) / chunk_size))
                         for chunk in chunks(dict_rse[rse_id], chunk_size):
@@ -162,6 +166,7 @@ def minos(bulk=1000, once=False, sleep_time=60):
 
             # Now get the temporary unavailable and update the replicas states
             for account, reason, expires_at in temporary_unvailables:
+                vo = account.vo
                 pfns = temporary_unvailables[(account, reason, expires_at)]
                 logging.info(prepend_str + 'Declaring %s replicas temporary available with timeout %s and reason %s' % (len(pfns), str(expires_at), reason))
                 logging.debug(prepend_str + 'Extracting RSEs')
@@ -176,7 +181,7 @@ def minos(bulk=1000, once=False, sleep_time=60):
                         schemes[scheme] = []
                     schemes[scheme].append(pfn)
                 for scheme in schemes:
-                    _, tmp_dict_rse, tmp_unknown_replicas = get_pfn_to_rse(schemes[scheme])
+                    _, tmp_dict_rse, tmp_unknown_replicas = get_pfn_to_rse(schemes[scheme], vo=vo)
                     for rse_id in tmp_dict_rse:
                         if rse_id not in dict_rse:
                             dict_rse[rse_id] = []
@@ -191,8 +196,9 @@ def minos(bulk=1000, once=False, sleep_time=60):
                 for rse_id in dict_rse:
                     replicas = []
                     rse = get_rse_name(rse_id=rse_id, session=None)
-                    logging.debug(prepend_str + 'Running on RSE %s' % rse)
-                    for rep in get_did_from_pfns(pfns=dict_rse[rse_id], rse_id=None, session=None):
+                    rse_vo_str = rse if vo == 'def' else '{} on {}'.format(rse, vo)
+                    logging.debug(prepend_str + 'Running on RSE %s' % rse_vo_str)
+                    for rep in get_did_from_pfns(pfns=dict_rse[rse_id], rse_id=None, vo=vo, session=None):
                         for pfn in rep:
                             scope = rep[pfn]['scope']
                             name = rep[pfn]['name']
@@ -201,7 +207,7 @@ def minos(bulk=1000, once=False, sleep_time=60):
                     # We update the replicas states to TEMPORARY_UNAVAILABLE
                     # then insert a row in the bad_replicas table. TODO Update the row if it already exists
                     # then delete the corresponding rows into the bad_pfns table
-                    logging.debug(prepend_str + 'Running on %s replicas on RSE %s' % (len(replicas), rse))
+                    logging.debug(prepend_str + 'Running on %s replicas on RSE %s' % (len(replicas), rse_vo_str))
                     nchunk = 0
                     tot_chunk = int(math.ceil(len(replicas) / float(chunk_size)))
                     session = get_session()
@@ -232,7 +238,7 @@ def minos(bulk=1000, once=False, sleep_time=60):
                                     elif expires_at < datetime.now():
                                         logging.info('%s PFN %s expiration time (%s) is older than now and is not in unavailable state. Removing the PFNs from bad_pfns', prepend_str, str(rep['pfn']), expires_at)
                                         bulk_delete_bad_pfns(pfns=[rep['pfn']], session=None)
-                                except (DataIdentifierNotFound, ReplicaNotFound) as error:
+                                except (DataIdentifierNotFound, ReplicaNotFound):
                                     logging.error(prepend_str + 'Will remove %s from the list of bad PFNs' % str(rep['pfn']))
                                     bulk_delete_bad_pfns(pfns=[rep['pfn']], session=None)
                             session = get_session()
@@ -262,6 +268,8 @@ def run(threads=1, bulk=100, once=False, sleep_time=60):
     """
     Starts up the minos threads.
     """
+    if rucio.db.sqla.util.is_old_db():
+        raise DatabaseException('Database was not updated, daemon won\'t start')
 
     if once:
         logging.info('Will run only one iteration in a single threaded mode')

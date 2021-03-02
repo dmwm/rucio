@@ -1,4 +1,5 @@
-# Copyright 2013-2018 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2013-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,15 +14,15 @@
 # limitations under the License.
 #
 # Authors:
-# - Martin Barisits <martin.barisits@cern.ch>, 2013-2017
+# - Martin Barisits <martin.barisits@cern.ch>, 2013-2020
 # - Mario Lassnig <mario.lassnig@cern.ch>, 2013
 # - Cedric Serfon <cedric.serfon@cern.ch>, 2013
-# - Vincent Garonne <vgaronne@gmail.com>, 2016-2018
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2016-2018
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
 # - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
-# - Brandon White <bjwhite@fnal.gov>, 2019-2020
-#
-# PY3K COMPATIBLE
+# - Brandon White <bjwhite@fnal.gov>, 2019
+# - Thomas Beermann <thomas.beermann@cern.ch>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
 """
 Judge-Evaluator is a daemon to re-evaluate and execute replication rules.
@@ -34,21 +35,21 @@ import sys
 import threading
 import time
 import traceback
-
 from datetime import datetime, timedelta
-from re import match
 from random import randint
-from six import iteritems
+from re import match
 
+from six import iteritems
 from sqlalchemy.exc import DatabaseError
 from sqlalchemy.orm.exc import FlushError
 
+import rucio.db.sqla.util
 from rucio.common.config import config_get
 from rucio.common.exception import DatabaseException, DataIdentifierNotFound, ReplicationRuleCreationTemporaryFailed
 from rucio.common.types import InternalScope
 from rucio.core.heartbeat import live, die, sanity_check
-from rucio.core.rule import re_evaluate_did, get_updated_dids, delete_updated_did
 from rucio.core.monitor import record_counter
+from rucio.core.rule import re_evaluate_did, get_updated_dids, delete_updated_did
 
 graceful_stop = threading.Event()
 
@@ -72,13 +73,14 @@ def re_evaluator(once=False):
     paused_dids = {}  # {(scope, name): datetime}
 
     # Make an initial heartbeat so that all judge-evaluators have the correct worker number on the next try
-    live(executable='rucio-judge-evaluator', hostname=hostname, pid=pid, thread=current_thread, older_than=60 * 30)
+    executable = 'judge-evaluator'
+    live(executable=executable, hostname=hostname, pid=pid, thread=current_thread, older_than=60 * 30)
     graceful_stop.wait(1)
 
     while not graceful_stop.is_set():
         try:
             # heartbeat
-            heartbeat = live(executable='rucio-judge-evaluator', hostname=hostname, pid=pid, thread=current_thread, older_than=60 * 30)
+            heartbeat = live(executable=executable, hostname=hostname, pid=pid, thread=current_thread, older_than=60 * 30)
 
             start = time.time()  # NOQA
 
@@ -126,7 +128,7 @@ def re_evaluator(once=False):
                         logging.debug('re_evaluator[%s/%s]: evaluation of %s:%s took %f' % (heartbeat['assign_thread'], heartbeat['nr_threads'], did.scope, did.name, time.time() - start_time))
                         delete_updated_did(id=did.id)
                         done_dids[did_tag].append(did.rule_evaluation_action)
-                    except DataIdentifierNotFound as e:
+                    except DataIdentifierNotFound:
                         delete_updated_did(id=did.id)
                     except (DatabaseException, DatabaseError) as e:
                         if match('.*ORA-00054.*', str(e.args[0])):
@@ -165,7 +167,7 @@ def re_evaluator(once=False):
         if once:
             break
 
-    die(executable='rucio-judge-evaluator', hostname=hostname, pid=pid, thread=current_thread)
+    die(executable=executable, hostname=hostname, pid=pid, thread=current_thread)
 
 
 def stop(signum=None, frame=None):
@@ -180,9 +182,12 @@ def run(once=False, threads=1):
     """
     Starts up the Judge-Eval threads.
     """
+    if rucio.db.sqla.util.is_old_db():
+        raise DatabaseException('Database was not updated, daemon won\'t start')
 
+    executable = 'judge-evaluator'
     hostname = socket.gethostname()
-    sanity_check(executable='rucio-judge-evaluator', hostname=hostname)
+    sanity_check(executable=executable, hostname=hostname)
 
     if once:
         re_evaluator(once)

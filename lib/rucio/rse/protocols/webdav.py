@@ -1,20 +1,31 @@
-'''
-  Copyright European Organization for Nuclear Research (CERN)
-
-  Licensed under the Apache License, Version 2.0 (the "License");
-  You may not use this file except in compliance with the License.
-  You may obtain a copy of the License at
-  http://www.apache.org/licenses/LICENSE-2.0
-
-  Authors:
-  - Cedric Serfon <cedric.serfon@cern.ch>, 2012-2017
-  - Vincent Garonne, <vincent.garonne@cern.ch>, 2013-2017
-  - Sylvain Blunier, <sylvain.blunier@cern.ch>, 2016
-  - Nicolo Magini, <nicolo.magini@cern.ch>, 2018
-  - Hannes Hansen, <hannes.jakob.hansen@cern.ch>, 2019
-
-  PY3K COMPATIBLE
-'''
+# Copyright 2012-2020 CERN for the benefit of the ATLAS collaboration.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Authors:
+# - Cedric Serfon <cedric.serfon@cern.ch>, 2012-2017
+# - Ralph Vigne <ralph.vigne@cern.ch>, 2013
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2013-2017
+# - David Cameron <david.cameron@cern.ch>, 2014
+# - Sylvain Blunier <sylvain.blunier@cern.ch>, 2016
+# - Joaquin Bogado <jbogado@linti.unlp.edu.ar>, 2018
+# - Nicolo Magini <nicolo.magini@cern.ch>, 2018
+# - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2019
+# - Eric Vaandering <ericvaandering@gmail.com>, 2019
+# - Jaroslav Guenther <jaroslav.guenther@cern.ch>, 2019
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
+#
+# PY3K COMPATIBLE
 
 from __future__ import print_function, division
 import os
@@ -182,6 +193,8 @@ class Default(protocol.RSEProtocol):
                 proxy_path = '/tmp/x509up_u%s' % os.geteuid()
                 if os.path.isfile(proxy_path):
                     x509 = proxy_path
+                elif self.auth_token:
+                    pass
                 else:
                     raise exception.RSEAccessDenied('X509_USER_PROXY is not set')
             self.cert = (x509, x509)
@@ -192,7 +205,8 @@ class Default(protocol.RSEProtocol):
             self.timeout = 300
         self.session = requests.Session()
         self.session.mount('https://', TLSv1HttpAdapter())
-
+        if self.auth_token:
+            self.session.headers.update({'Authorization': 'Bearer ' + self.auth_token})
         # "ping" to see if the server is available
         try:
             res = self.session.request('HEAD', self.path2pfn(''), verify=False, timeout=self.timeout, cert=self.cert)
@@ -521,7 +535,7 @@ class Default(protocol.RSEProtocol):
             usedsize = root[0][1][0].find('{DAV:}quota-used-bytes').text
             try:
                 unusedsize = root[0][1][0].find('{DAV:}quota-available-bytes').text
-            except Exception as error:
+            except Exception:
                 print('No free space given, return -999')
                 unusedsize = -999
             totalsize = int(usedsize) + int(unusedsize)

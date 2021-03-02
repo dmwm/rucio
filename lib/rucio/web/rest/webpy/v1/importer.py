@@ -1,5 +1,6 @@
-#!/usr/bin/env python
-# Copyright 2012-2018 CERN for the benefit of the ATLAS collaboration.
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Copyright 2018-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,15 +16,17 @@
 #
 # Authors:
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018
-#
-# PY3K COMPATIBLE
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
+# - Thomas Beermann <thomas.beermann@cern.ch>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
 from web import (application, data, header, loadhook, ctx, Created)
 
-from rucio.common.exception import RucioException
-from rucio.common.utils import generate_http_error, parse_response
 from rucio.api.importer import import_data
+from rucio.common.exception import RucioException
+from rucio.common.utils import parse_response
 from rucio.web.rest.common import rucio_loadhook, RucioController
+from rucio.web.rest.utils import generate_http_error
 
 URLS = (
     '/', 'Import',
@@ -54,7 +57,7 @@ class Import(RucioController):
             raise generate_http_error(400, 'ValueError', 'Cannot decode json parameter dictionary')
 
         try:
-            import_data(data=data_to_import, issuer=ctx.env.get('issuer'))
+            import_data(data=data_to_import, issuer=ctx.env.get('issuer'), vo=ctx.env.get('vo'))
         except RucioException as error:
             raise generate_http_error(500, error.__class__.__name__, error.args[0])
 
@@ -67,4 +70,5 @@ class Import(RucioController):
 
 APP = application(URLS, globals())
 APP.add_processor(loadhook(rucio_loadhook))
-application = APP.wsgifunc()
+if __name__ != "rucio.web.rest.importer":
+    application = APP.wsgifunc()

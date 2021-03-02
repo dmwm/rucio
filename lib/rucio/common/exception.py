@@ -19,10 +19,13 @@
 # - Mario Lassnig <mario.lassnig@cern.ch>, 2012-2017
 # - Vincent Garonne <vgaronne@gmail.com>, 2012-2018
 # - Ralph Vigne <ralph.vigne@cern.ch>, 2012-2013
-# - Cedric Serfon <cedric.serfon@cern.ch>, 2013-2019
+# - Cedric Serfon <cedric.serfon@cern.ch>, 2013-2020
 # - Wen Guan <wguan.icedew@gmail.com>, 2014-2015
 # - Tobias Wegner <twegner@cern.ch>, 2018
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
+# - Patrick Austin <patrick.austin@stfc.ac.uk>, 2020
+# - Eric Vaandering <ewv@fnal.gov>, 2020
 #
 # PY3K COMPATIBLE
 
@@ -564,13 +567,23 @@ class RSEAccessDenied(RucioException):
         self.error_code = 49
 
 
-class RSEBlacklisted(RucioException):
+class RSEWriteBlocked(RucioException):
     """
     RucioException
     """
     def __init__(self, *args, **kwargs):
+        super(RSEWriteBlocked, self).__init__(*args, **kwargs)
+        self._message = "RSE excluded; not available for writing."
+        self.error_code = 50
+
+
+class RSEBlacklisted(RucioException):
+    """
+    RucioException: To be deprecated at a later time, replaced by RSEWriteBlocked
+    """
+    def __init__(self, *args, **kwargs):
         super(RSEBlacklisted, self).__init__(*args, **kwargs)
-        self._message = "RSE excluded due to write blacklisting."
+        self._message = "RSE excluded; not available for writing."
         self.error_code = 50
 
 
@@ -972,3 +985,53 @@ class NoDistance(RucioException):
         super(NoDistance, self).__init__(*args, **kwargs)
         self._message = 'Cannot found a distance between 2 RSEs'
         self.error_code = 92
+
+
+class PolicyPackageNotFound(RucioException):
+    """
+    The policy package specified in the config file cannot be loaded.
+    """
+    def __init__(self, *args, **kwargs):
+        super(PolicyPackageNotFound, self).__init__(*args, **kwargs)
+        self._message = 'The specified policy package cannot be loaded'
+        self.error_code = 93
+
+
+class CannotAuthorize(RucioException):
+    """
+    Failed to authorize an operation.
+    """
+    def __init__(self, *args, **kwargs):
+        super(CannotAuthorize, self).__init__(*args, **kwargs)
+        self._message = 'Can not authorize operation.'
+        self.error_code = 94
+
+
+class SubscriptionWrongParameter(RucioException):
+    """
+    RucioException
+    """
+    def __init__(self, *args, **kwargs):
+        super(SubscriptionWrongParameter, self).__init__(*args, **kwargs)
+        self._message = "Subscription wrong parameters"
+        self.error_code = 95
+
+
+class VONotFound(RucioException):
+    """
+    Requested VO does not exist.
+    """
+    def __init__(self, *args, **kwargs):
+        super(VONotFound, self).__init__(*args, **kwargs)
+        self.message = 'The requested VO does not exist'
+        self.error_code = 96
+
+
+class UnsupportedAccountName(RucioException):
+    """
+    Requested account name is not supported for users.
+    """
+    def __init__(self, *args, **kwargs):
+        super(UnsupportedAccountName, self).__init__(*args, **kwargs)
+        self.message = 'The requested account name cannot be used'
+        self.error_code = 97

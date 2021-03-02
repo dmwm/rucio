@@ -1,4 +1,5 @@
-# Copyright 2012-2018 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2012-2021 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,25 +15,35 @@
 #
 # Authors:
 # - Ralph Vigne <ralph.vigne@cern.ch>, 2012-2015
-# - Vincent Garonne <vgaronne@gmail.com>, 2012-2018
-# - Mario Lassnig <mario.lassnig@cern.ch>, 2012-2018
-# - Cedric Serfon <cedric.serfon@cern.ch>, 2012-2017
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2012-2018
+# - Mario Lassnig <mario.lassnig@cern.ch>, 2012-2020
+# - Cedric Serfon <cedric.serfon@cern.ch>, 2012-2020
 # - Yun-Pin Sun <winter0128@gmail.com>, 2013
-# - Wen Guan <wguan.icedew@gmail.com>, 2014-2017
-# - Martin Barisits <martin.barisits@cern.ch>, 2017-2019
-# - Tobias Wegner <twegner@cern.ch>, 2017-2018
+# - Wen Guan <wen.guan@cern.ch>, 2014-2017
+# - Martin Barisits <martin.barisits@cern.ch>, 2017-2020
+# - Tobias Wegner <twegner@cern.ch>, 2017-2019
 # - Brian Bockelman <bbockelm@cse.unl.edu>, 2018
 # - Frank Berghaus <frank.berghaus@cern.ch>, 2018-2019
-# - Joaquin Bogado <jbogado@linti.unlp.edu.ar>, 2018
+# - Joaquín Bogado <jbogado@linti.unlp.edu.ar>, 2018
 # - Nicolo Magini <nicolo.magini@cern.ch>, 2018
+# - Tomas Javurek <tomas.javurek@cern.ch>, 2018-2020
+# - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
 # - James Perry <j.perry@epcc.ed.ac.uk>, 2019
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
 # - Gabriele Fronze' <gfronze@cern.ch>, 2019
+# - Jaroslav Guenther <jaroslav.guenther@cern.ch>, 2019-2020
+# - Eli Chadwick <eli.chadwick@stfc.ac.uk>, 2020
+# - Dimitrios Christidis <dimitrios.christidis@cern.ch>, 2020
+# - Patrick Austin <patrick.austin@stfc.ac.uk>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
+# - Thomas Beermann <thomas.beermann@cern.ch>, 2021
 #
 # PY3K COMPATIBLE
 
 from __future__ import print_function
 
 import copy
+import logging
 import random
 from time import sleep
 
@@ -46,12 +57,17 @@ from rucio.common.config import config_get_int
 from rucio.common.constraints import STRING_TYPES
 from rucio.common.utils import make_valid_did, GLOBALLY_SUPPORTED_CHECKSUMS
 
+_logger = logging.getLogger(__name__)
 
-def get_rse_info(rse, session=None):
+
+def get_rse_info(rse=None, vo='def', rse_id=None, session=None):
     """
         Returns all protocol related RSE attributes.
+        Call with either rse and vo, or (in server mode) rse_id
 
         :param rse: Name of the requested RSE
+        :param vo: The VO for the RSE.
+        :param rse_id: The id of the rse (use in server mode to avoid db calls)
         :param session: The eventual database session.
 
         :returns: a dict object with the following attributes:
@@ -75,10 +91,12 @@ def get_rse_info(rse, session=None):
     """
     # __request_rse_info will be assigned when the module is loaded as it depends on the rucio environment (server or client)
     # __request_rse_info, rse_region are defined in /rucio/rse/__init__.py
-    rse_info = RSE_REGION.get(str(rse))   # NOQA pylint: disable=undefined-variable
+    key = '{}:{}'.format(rse, vo) if rse_id is None else str(rse_id)
+    key = 'rse_info_%s' % (key)
+    rse_info = RSE_REGION.get(key)   # NOQA pylint: disable=undefined-variable
     if not rse_info:  # no cached entry found
-        rse_info = __request_rse_info(str(rse), session=session)  # NOQA pylint: disable=undefined-variable
-        RSE_REGION.set(str(rse), rse_info)  # NOQA pylint: disable=undefined-variable
+        rse_info = __request_rse_info(str(rse), vo=vo, rse_id=rse_id, session=session)  # NOQA pylint: disable=undefined-variable
+        RSE_REGION.set(key, rse_info)  # NOQA pylint: disable=undefined-variable
     return rse_info
 
 
@@ -152,14 +170,15 @@ def select_protocol(rse_settings, operation, scheme=None, domain='wan'):
     return min(candidates, key=lambda k: k['domains'][domain][operation])
 
 
-def create_protocol(rse_settings, operation, scheme=None, domain='wan'):
+def create_protocol(rse_settings, operation, scheme=None, domain='wan', auth_token=None, logger=_logger):
     """
     Instanciates the protocol defined for the given operation.
 
-    :param rse_attr:  RSE attributes
+    :param rse_settings:  RSE attributes
     :param operation: Intended operation for this protocol
     :param scheme:    Optional filter if no specific protocol is defined in rse_setting for the provided operation
     :param domain:    Optional specification of the domain
+    :param auth_token: Optionally passing JSON Web Token (OIDC) string for authentication
     :returns:         An instance of the requested protocol
     """
 
@@ -179,32 +198,40 @@ def create_protocol(rse_settings, operation, scheme=None, domain='wan'):
     for n in comp[1:]:
         try:
             mod = getattr(mod, n)
-        except AttributeError:
-            print('Protocol implementation not found')
-            raise  # TODO: provide proper rucio exception
-    protocol = mod(protocol_attr, rse_settings)
+        except AttributeError as e:
+            logger.debug('Protocol implementations not supported.')
+            raise exception.RucioException(str(e))  # TODO: provide proper rucio exception
+    protocol_attr['auth_token'] = auth_token
+    protocol = mod(protocol_attr, rse_settings, logger=logger)
     return protocol
 
 
-def lfns2pfns(rse_settings, lfns, operation='write', scheme=None, domain='wan'):
+def lfns2pfns(rse_settings, lfns, operation='write', scheme=None, domain='wan', auth_token=None):
     """
         Convert the lfn to a pfn
 
+        :rse_settings:   RSE attributes
         :param lfns:        logical file names as a dict containing 'scope' and 'name' as keys. For bulk a list of dicts can be provided
-        :param protocol:    instance of the protocol to be used to create the PFN
+        :param operation: Intended operation for this protocol
+        :param scheme:    Optional filter if no specific protocol is defined in rse_setting for the provided operation
+        :param domain:    Optional specification of the domain
+        :param auth_token: Optionally passing JSON Web Token (OIDC) string for authentication
 
         :returns: a dict with scope:name as key and the PFN as value
 
     """
-    return create_protocol(rse_settings, operation, scheme, domain).lfns2pfns(lfns)
+    return create_protocol(rse_settings, operation, scheme, domain, auth_token=auth_token).lfns2pfns(lfns)
 
 
-def parse_pfns(rse_settings, pfns, operation='read', domain='wan'):
+def parse_pfns(rse_settings, pfns, operation='read', domain='wan', auth_token=None):
     """
         Checks if a PFN is feasible for a given RSE. If so it splits the pfn in its various components.
 
+        :rse_settings:   RSE attributes
         :param pfns:        list of PFNs
-        :param protocol:    instance of the protocol to be used to create the PFN
+        :param operation: Intended operation for this protocol
+        :param domain:    Optional specification of the domain
+        :param auth_token: Optionally passing JSON Web Token (OIDC) string for authentication
 
         :returns: A dict with the parts known by the selected protocol e.g. scheme, hostname, prefix, path, name
 
@@ -215,27 +242,39 @@ def parse_pfns(rse_settings, pfns, operation='read', domain='wan'):
     """
     if len(set([urlparse(pfn).scheme for pfn in pfns])) != 1:
         raise ValueError('All PFNs must provide the same protocol scheme')
-    return create_protocol(rse_settings, operation, urlparse(pfns[0]).scheme, domain).parse_pfns(pfns)
+    return create_protocol(rse_settings, operation, urlparse(pfns[0]).scheme, domain, auth_token=auth_token).parse_pfns(pfns)
 
 
-def exists(rse_settings, files):
+def exists(rse_settings, files, domain='wan', auth_token=None, logger=_logger):
     """
         Checks if a file is present at the connected storage.
         Providing a list indicates the bulk mode.
 
+        :rse_settings:   RSE attributes
         :param files: a single dict or a list with dicts containing 'scope' and 'name'
                       if LFNs are used and only 'name' if PFNs are used.
                       E.g. {'name': '2_rse_remote_get.raw', 'scope': 'user.jdoe'}, {'name': 'user/jdoe/5a/98/3_rse_remote_get.raw'}
+        :param domain: The network domain, either 'wan' (default) or 'lan'
+        :param auth_token: Optionally passing JSON Web Token (OIDC) string for authentication
+        :param logger: An optional logging.Logger object
 
         :returns: True/False for a single file or a dict object with 'scope:name' for LFNs or 'name' for PFNs as keys and True or the exception as value for each file in bulk mode
 
         :raises RSENotConnected: no connection to a specific storage has been established
     """
+
     ret = {}
     gs = True  # gs represents the global status which inidcates if every operation workd in bulk mode
 
-    protocol = create_protocol(rse_settings, 'read')
+    protocol = create_protocol(rse_settings, 'read', domain=domain, auth_token=auth_token, logger=logger)
     protocol.connect()
+    try:
+        protocol.exists(None)
+    except NotImplementedError:
+        protocol = create_protocol(rse_settings, 'write', domain=domain, auth_token=auth_token)
+        protocol.connect()
+    except:
+        pass
 
     files = [files] if not type(files) is list else files
     for f in files:
@@ -247,6 +286,7 @@ def exists(rse_settings, files):
             pfn = list(protocol.lfns2pfns(f).values())[0]
             if isinstance(pfn, exception.RucioException):
                 raise pfn
+            logger.debug('Checking if %s exists', pfn)
             # deal with URL signing if required
             if rse_settings['sign_url'] is not None and pfn[:5] == 'https':
                 pfn = __get_signed_url(rse_settings['rse'], rse_settings['sign_url'], 'read', pfn)    # NOQA pylint: disable=undefined-variable
@@ -265,11 +305,12 @@ def exists(rse_settings, files):
     return [gs, ret]
 
 
-def upload(rse_settings, lfns, source_dir=None, force_pfn=None, force_scheme=None, transfer_timeout=None, delete_existing=False, sign_service=None):
+def upload(rse_settings, lfns, domain='wan', source_dir=None, force_pfn=None, force_scheme=None, transfer_timeout=None, delete_existing=False, sign_service=None, auth_token=None, logger=_logger):
     """
         Uploads a file to the connected storage.
         Providing a list indicates the bulk mode.
 
+        :rse_settings:   RSE attributes
         :param lfns:        a single dict or a list with dicts containing 'scope' and 'name'.
                             Examples:
                             [
@@ -277,11 +318,14 @@ def upload(rse_settings, lfns, source_dir=None, force_pfn=None, force_scheme=Non
                             {'name': '2_rse_local_put.raw', 'scope': 'user.jdoe', 'filesize': 4711, 'adler32': 'RSSMICETHMISBA837464F'}
                             ]
                             If the 'filename' key is present, it will be used by Rucio as the actual name of the file on disk (separate from the Rucio 'name').
+        :param domain: The network domain, either 'wan' (default) or 'lan'
         :param source_dir:  path to the local directory including the source files
         :param force_pfn: use the given PFN -- can lead to dark data, use sparingly
         :param force_scheme: use the given protocol scheme, overriding the protocol priority in the RSE description
         :param transfer_timeout: set this timeout (in seconds) for the transfers, for protocols that support it
         :param sign_service: use the given service (e.g. gcs, s3, swift) to sign the URL
+        :param auth_token: Optionally passing JSON Web Token (OIDC) string for authentication
+        :param logger: An optional logging.Logger object
 
         :returns: True/False for a single file or a dict object with 'scope:name' as keys and True or the exception as value for each file in bulk mode
 
@@ -290,12 +334,13 @@ def upload(rse_settings, lfns, source_dir=None, force_pfn=None, force_scheme=Non
         :raises DestinationNotAccessible: remote destination directory is not accessible
         :raises ServiceUnavailable: for any other reason
     """
+
     ret = {}
     gs = True  # gs represents the global status which indicates if every operation worked in bulk mode
 
-    protocol = create_protocol(rse_settings, 'write', scheme=force_scheme)
+    protocol = create_protocol(rse_settings, 'write', scheme=force_scheme, domain=domain, auth_token=auth_token, logger=logger)
     protocol.connect()
-    protocol_delete = create_protocol(rse_settings, 'delete')
+    protocol_delete = create_protocol(rse_settings, 'delete', domain=domain, auth_token=auth_token, logger=logger)
     protocol_delete.connect()
 
     lfns = [lfns] if not type(lfns) is list else lfns
@@ -335,6 +380,7 @@ def upload(rse_settings, lfns, source_dir=None, force_pfn=None, force_scheme=Non
             else:
                 if protocol.exists('%s.rucio.upload' % pfn):  # Check for left over of previous unsuccessful attempts
                     try:
+                        logger.debug('Deleting %s.rucio.upload', pfn)
                         protocol_delete.delete('%s.rucio.upload' % list(protocol_delete.lfns2pfns(make_valid_did(lfn)).values())[0])
                     except Exception as e:
                         ret['%s:%s' % (scope, name)] = exception.RSEOperationNotSupported('Unable to remove temporary file %s.rucio.upload: %s' % (pfn, str(e)))
@@ -344,6 +390,7 @@ def upload(rse_settings, lfns, source_dir=None, force_pfn=None, force_scheme=Non
                 if delete_existing:
                     if protocol.exists('%s' % pfn):  # Check for previous completed uploads that have to be removed before upload
                         try:
+                            logger.debug('Deleting %s', pfn)
                             protocol_delete.delete('%s' % list(protocol_delete.lfns2pfns(make_valid_did(lfn)).values())[0])
                         except Exception as e:
                             ret['%s:%s' % (scope, name)] = exception.RSEOperationNotSupported('Unable to remove file %s: %s' % (pfn, str(e)))
@@ -351,6 +398,7 @@ def upload(rse_settings, lfns, source_dir=None, force_pfn=None, force_scheme=Non
                             continue
 
                 try:  # Try uploading file
+                    logger.debug('Uploading to %s.rucio.upload', pfn)
                     protocol.put(base_name, '%s.rucio.upload' % pfn, source_dir, transfer_timeout=transfer_timeout)
                 except Exception as e:
                     gs = False
@@ -362,18 +410,21 @@ def upload(rse_settings, lfns, source_dir=None, force_pfn=None, force_scheme=Non
                 try:  # Get metadata of file to verify if upload was successful
                     try:
                         stats = _retry_protocol_stat(protocol, '%s.rucio.upload' % pfn)
-
                         # Verify all supported checksums and keep rack of the verified ones
                         verified_checksums = []
                         for checksum_name in GLOBALLY_SUPPORTED_CHECKSUMS:
                             if (checksum_name in stats) and (checksum_name in lfn):
                                 verified_checksums.append(stats[checksum_name] == lfn[checksum_name])
-
                         # Upload is successful if at least one checksum was found
                         valid = any(verified_checksums)
                         if not valid and ('filesize' in stats) and ('filesize' in lfn):
                             valid = stats['filesize'] == lfn['filesize']
-                    except exception.RSEChecksumUnavailable as e:
+                    except NotImplementedError:
+                        if rse_settings['verify_checksum'] is False:
+                            valid = True
+                        else:
+                            raise exception.RucioException('Checksum not validated')
+                    except exception.RSEChecksumUnavailable:
                         if rse_settings['verify_checksum'] is False:
                             valid = True
                         else:
@@ -385,6 +436,7 @@ def upload(rse_settings, lfns, source_dir=None, force_pfn=None, force_scheme=Non
 
                 if valid:  # The upload finished successful and the file can be renamed
                     try:
+                        logger.debug('Renaming %s.rucio.upload to %s', pfn, pfn)
                         protocol.rename('%s.rucio.upload' % pfn, pfn)
                         ret['%s:%s' % (scope, name)] = True
                     except Exception as e:
@@ -401,6 +453,7 @@ def upload(rse_settings, lfns, source_dir=None, force_pfn=None, force_scheme=Non
                 gs = False
             else:
                 try:  # Try uploading file
+                    logger.debug('Uploading to %s', pfn)
                     protocol.put(base_name, pfn, source_dir, transfer_timeout=transfer_timeout)
                 except Exception as e:
                     gs = False
@@ -422,7 +475,12 @@ def upload(rse_settings, lfns, source_dir=None, force_pfn=None, force_scheme=Non
                         valid = any(verified_checksums)
                         if not valid and ('filesize' in stats) and ('filesize' in lfn):
                             valid = stats['filesize'] == lfn['filesize']
-                    except exception.RSEChecksumUnavailable as e:
+                    except NotImplementedError:
+                        if rse_settings['verify_checksum'] is False:
+                            valid = True
+                        else:
+                            raise exception.RucioException('Checksum not validated')
+                    except exception.RSEChecksumUnavailable:
                         if rse_settings['verify_checksum'] is False:
                             valid = True
                         else:
@@ -443,17 +501,19 @@ def upload(rse_settings, lfns, source_dir=None, force_pfn=None, force_scheme=Non
             if isinstance(ret[x], Exception):
                 raise ret[x]
             else:
-                return {'success': ret[x],
-                        'pfn': pfn}
+                return {0: ret[x], 1: ret, 'success': ret[x], 'pfn': pfn}
     return {0: gs, 1: ret, 'success': gs, 'pfn': pfn}
 
 
-def delete(rse_settings, lfns):
+def delete(rse_settings, lfns, domain='wan', auth_token=None):
     """
         Delete a file from the connected storage.
         Providing a list indicates the bulk mode.
 
+        :rse_settings:   RSE attributes
         :param lfns:        a single dict or a list with dicts containing 'scope' and 'name'. E.g. [{'name': '1_rse_remote_delete.raw', 'scope': 'user.jdoe'}, {'name': '2_rse_remote_delete.raw', 'scope': 'user.jdoe'}]
+        :param domain: The network domain, either 'wan' (default) or 'lan'
+        :param auth_token: Optionally passing JSON Web Token (OIDC) string for authentication
 
         :returns: True/False for a single file or a dict object with 'scope:name' as keys and True or the exception as value for each file in bulk mode
 
@@ -465,7 +525,7 @@ def delete(rse_settings, lfns):
     ret = {}
     gs = True  # gs represents the global status which inidcates if every operation workd in bulk mode
 
-    protocol = create_protocol(rse_settings, 'delete')
+    protocol = create_protocol(rse_settings, 'delete', domain=domain, auth_token=auth_token)
     protocol.connect()
 
     lfns = [lfns] if not type(lfns) is list else lfns
@@ -488,11 +548,12 @@ def delete(rse_settings, lfns):
     return [gs, ret]
 
 
-def rename(rse_settings, files):
+def rename(rse_settings, files, domain='wan', auth_token=None):
     """
         Rename files stored on the connected storage.
         Providing a list indicates the bulk mode.
 
+        :rse_settings:   RSE attributes
         :param files: a single dict or a list with dicts containing 'scope', 'name', 'new_scope' and 'new_name'
                       if LFNs are used or only 'name' and 'new_name' if PFNs are used.
                       If 'new_scope' or 'new_name' are not provided, the current one is used.
@@ -501,6 +562,8 @@ def rename(rse_settings, files):
                       {'name': '3_rse_remote_rename.raw', 'scope': 'user.jdoe', 'new_name': '3_rse_new.raw', 'new_scope': 'user.jdoe'},
                       {'name': 'user/jdoe/d9/cb/9_rse_remote_rename.raw', 'new_name': 'user/jdoe/c6/4a/9_rse_new.raw'}
                       ]
+        :param domain: The network domain, either 'wan' (default) or 'lan'
+        :param auth_token: Optionally passing JSON Web Token (OIDC) string for authentication
 
         :returns: True/False for a single file or a dict object with LFN (key) and True/False (value) in bulk mode
 
@@ -512,7 +575,7 @@ def rename(rse_settings, files):
     ret = {}
     gs = True  # gs represents the global status which inidcates if every operation workd in bulk mode
 
-    protocol = create_protocol(rse_settings, 'write')
+    protocol = create_protocol(rse_settings, 'write', domain=domain, auth_token=auth_token)
     protocol.connect()
 
     files = [files] if not type(files) is list else files
@@ -560,11 +623,14 @@ def rename(rse_settings, files):
     return [gs, ret]
 
 
-def get_space_usage(rse_settings, scheme=None):
+def get_space_usage(rse_settings, scheme=None, domain='wan', auth_token=None):
     """
         Get RSE space usage information.
 
+        :rse_settings:   RSE attributes
         :param scheme: optional filter to select which protocol to be used.
+        :param domain: The network domain, either 'wan' (default) or 'lan'
+        :param auth_token: Optionally passing JSON Web Token (OIDC) string for authentication
 
         :returns: a list with dict containing 'totalsize' and 'unusedsize'
 
@@ -573,7 +639,7 @@ def get_space_usage(rse_settings, scheme=None):
     gs = True
     ret = {}
 
-    protocol = create_protocol(rse_settings, 'read', scheme)
+    protocol = create_protocol(rse_settings, 'read', scheme=scheme, domain=domain, auth_token=auth_token)
     protocol.connect()
 
     try:
@@ -616,7 +682,8 @@ def find_matching_scheme(rse_settings_dest, rse_settings_src, operation_src, ope
             if protocol['scheme'] not in scheme:
                 tbr.append(protocol)
                 continue
-        if protocol['domains'].get(domain, {}).get(operation_src, 1) == 0:
+        prot = protocol['domains'].get(domain, {}).get(operation_src, 1)
+        if prot is None or prot == 0:
             tbr.append(protocol)
     for r in tbr:
         src_candidates.remove(r)
@@ -631,7 +698,8 @@ def find_matching_scheme(rse_settings_dest, rse_settings_src, operation_src, ope
             if protocol['scheme'] not in scheme:
                 tbr.append(protocol)
                 continue
-        if protocol['domains'].get(domain, {}).get(operation_dest, 1) == 0:
+        prot = protocol['domains'].get(domain, {}).get(operation_dest, 1)
+        if prot is None or prot == 0:
             tbr.append(protocol)
     for r in tbr:
         dest_candidates.remove(r)
@@ -671,7 +739,9 @@ def _retry_protocol_stat(protocol, pfn):
         except exception.RSEChecksumUnavailable as e:
             # The stat succeeded here, but the checksum failed
             raise e
-        except Exception as e:
+        except NotImplementedError:
+            break
+        except Exception:
             sleep(2**attempt)
     return protocol.stat(pfn)
 

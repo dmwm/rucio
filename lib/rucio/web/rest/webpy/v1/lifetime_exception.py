@@ -1,5 +1,6 @@
-#!/usr/bin/env python
-# Copyright 2012-2018 CERN for the benefit of the ATLAS collaboration.
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Copyright 2016-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,10 +16,11 @@
 #
 # Authors:
 # - Cedric Serfon <cedric.serfon@cern.ch>, 2016-2017
+# - Thomas Beermann <thomas.beermann@cern.ch>, 2018-2020
 # - Mario Lassnig <mario.lassnig@cern.ch>, 2018
-# - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2019
-#
-# PY3K COMPATIBLE
+# - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
 from json import loads, dumps
 
@@ -26,9 +28,9 @@ from web import application, ctx, data, header, BadRequest, Created, InternalErr
 
 from rucio.api.lifetime_exception import list_exceptions, add_exception, update_exception
 from rucio.common.exception import LifetimeExceptionNotFound, UnsupportedOperation, InvalidObject, RucioException, AccessDenied, LifetimeExceptionDuplicate
-from rucio.common.utils import generate_http_error, APIEncoder
+from rucio.common.utils import APIEncoder
 from rucio.web.rest.common import rucio_loadhook, check_accept_header_wrapper
-
+from rucio.web.rest.utils import generate_http_error
 
 URLS = ('/', 'LifetimeException',
         '/(.+)', 'LifetimeExceptionId',)
@@ -53,7 +55,7 @@ class LifetimeException:
         """
         header('Content-Type', 'application/x-json-stream')
         try:
-            for exception in list_exceptions():
+            for exception in list_exceptions(vo=ctx.env.get('vo')):
                 yield dumps(exception, cls=APIEncoder) + '\n'
         except LifetimeExceptionNotFound as error:
             raise generate_http_error(404, 'LifetimeExceptionNotFound', error.args[0])
@@ -91,7 +93,8 @@ class LifetimeException:
             raise generate_http_error(400, 'ValueError', 'Cannot decode json parameter list')
 
         try:
-            exception_id = add_exception(dids=dids, account=ctx.env.get('issuer'), pattern=pattern, comments=comments, expires_at=expires_at)
+            exception_id = add_exception(dids=dids, account=ctx.env.get('issuer'), vo=ctx.env.get('vo'),
+                                         pattern=pattern, comments=comments, expires_at=expires_at)
         except InvalidObject as error:
             raise generate_http_error(400, 'InvalidObject', error.args[0])
         except AccessDenied as error:
@@ -124,7 +127,7 @@ class LifetimeExceptionId:
         """
         header('Content-Type', 'application/x-json-stream')
         try:
-            for exception in list_exceptions(exception_id):
+            for exception in list_exceptions(exception_id, vo=ctx.env.get('vo')):
                 yield dumps(exception, cls=APIEncoder) + '\n'
 
         except LifetimeExceptionNotFound as error:
@@ -157,7 +160,7 @@ class LifetimeExceptionId:
         except KeyError:
             state = None
         try:
-            update_exception(exception_id=exception_id, state=state, issuer=ctx.env.get('issuer'))
+            update_exception(exception_id=exception_id, state=state, issuer=ctx.env.get('issuer'), vo=ctx.env.get('vo'))
         except UnsupportedOperation as error:
             raise generate_http_error(400, 'UnsupportedOperation', error.args[0])
         except AccessDenied as error:
@@ -182,4 +185,5 @@ class LifetimeExceptionId:
 
 APP = application(URLS, globals())
 APP.add_processor(loadhook(rucio_loadhook))
-application = APP.wsgifunc()
+if __name__ != "rucio.web.rest.lifetime_exception":
+    application = APP.wsgifunc()

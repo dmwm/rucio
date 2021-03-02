@@ -6,10 +6,16 @@
 #
 # Authors:
 # - Martin Barisits, <martin.barisits@cern.ch>, 2017-2019
+# - Gabriele Gaetano Fronze' <gabriele.fronze@to.infn.it>, 2020
 
-import os
-import subprocess
 import sys
+import os
+import os.path
+base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(base_path)
+os.chdir(base_path)
+
+import subprocess  # noqa: E402
 
 
 def run_git_command(cmd):
@@ -22,13 +28,13 @@ if os.path.isdir('.git'):
         GIT_VERSION = sys.argv[1]
     else:
         GIT_VERSION_CMD = 'git describe --abbrev=4'
-        GIT_VERSION = run_git_command(GIT_VERSION_CMD)
+        GIT_VERSION = run_git_command(GIT_VERSION_CMD).decode()
     BRANCH_NICK_CMD = 'git branch | grep -Ei "\* (.*)" | cut -f2 -d" "'  # NOQA: W605
-    BRANCH_NICK = run_git_command(BRANCH_NICK_CMD)
+    BRANCH_NICK = run_git_command(BRANCH_NICK_CMD).decode()
     REVID_CMD = "git rev-parse HEAD"
-    REVID = run_git_command(REVID_CMD)
+    REVID = run_git_command(REVID_CMD).decode()
     REVNO_CMD = "git --no-pager log --oneline | wc -l"
-    REVNO = run_git_command(REVNO_CMD)
+    REVNO = run_git_command(REVNO_CMD).decode()
     VERSION_FILE = open("lib/rucio/vcsversion.py", 'w')
     VERSION_FILE.write("""
 '''

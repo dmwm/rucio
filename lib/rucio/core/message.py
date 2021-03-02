@@ -1,4 +1,5 @@
-# Copyright 2014-2019 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2014-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,25 +14,36 @@
 # limitations under the License.
 #
 # Authors:
-# - Mario Lassnig <mario.lassnig@cern.ch>, 2014-2019
-# - Vincent Garonne <vgaronne@gmail.com>, 2014-2017
+# - Mario Lassnig <mario.lassnig@cern.ch>, 2014-2020
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2014-2017
 # - Martin Barisits <martin.barisits@cern.ch>, 2014-2019
 # - Robert Illingworth <illingwo@fnal.gov>, 2018
-# - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018
-# - Brandon White <bjwhite@fnal.gov>, 2019-2020
-#
-# PY3K COMPATIBLE
+# - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
+# - Brandon White <bjwhite@fnal.gov>, 2019
+# - Cedric Serfon <cedric.serfon@cern.ch>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
 import json
 
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 
-from rucio.common.exception import InvalidObject, RucioException
+from dogpile.cache import make_region
+from dogpile.cache.api import NO_VALUE
+
+from rucio.common.config import config_get
+from rucio.common.exception import InvalidObject, RucioException, ConfigNotFound
 from rucio.common.utils import APIEncoder
+from rucio.core.config import get
 from rucio.db.sqla import filter_thread_work
 from rucio.db.sqla.models import Message, MessageHistory
 from rucio.db.sqla.session import transactional_session
+
+
+REGION = make_region().configure('dogpile.cache.memcached',
+                                 expiration_time=3600,
+                                 arguments={'url': config_get('cache', 'url', False, '127.0.0.1:11211'),
+                                            'distributed_lock': True})
 
 
 @transactional_session
@@ -46,15 +58,23 @@ def add_message(event_type, payload, session=None):
     :param session: The database session to use.
     """
 
+    services_list = REGION.get('services_list')
+    if services_list == NO_VALUE:
+        try:
+            services_list = get('hermes', 'services_list')
+        except ConfigNotFound:
+            services_list = None
+        REGION.set('services_list', services_list)
+
     try:
         payload = json.dumps(payload, cls=APIEncoder)
-    except TypeError as e:
+    except TypeError as e:  # noqa: F841
         raise InvalidObject('Invalid JSON for payload: %(e)s' % locals())
 
     if len(payload) > 4000:
-        new_message = Message(event_type=event_type, payload='nolimit', payload_nolimit=payload)
+        new_message = Message(event_type=event_type, payload='nolimit', payload_nolimit=payload, services=services_list)
     else:
-        new_message = Message(event_type=event_type, payload=payload)
+        new_message = Message(event_type=event_type, payload=payload, services=services_list)
 
     new_message.save(session=session, flush=False)
 
@@ -72,7 +92,7 @@ def retrieve_messages(bulk=1000, thread=None, total_threads=None, event_type=Non
     :param lock: Select exclusively some rows.
     :param session: The database session to use.
 
-    :returns messages: List of dictionaries {id, created_at, event_type, payload}
+    :returns messages: List of dictionaries {id, created_at, event_type, payload, services}
     """
     messages = []
     try:
@@ -86,17 +106,25 @@ def retrieve_messages(bulk=1000, thread=None, total_threads=None, event_type=Non
         # Step 1:
         # MySQL does not support limits in nested queries, limit on the outer query instead.
         # This is not as performant, but the best we can get from MySQL.
+        # FIXME: SQLAlchemy generates wrong nowait MySQL8 statement for MySQL5
+        #        Remove once this is resolved in SQLAlchemy
         if session.bind.dialect.name == 'mysql':
             subquery = subquery.order_by(Message.created_at)
+            query = session.query(Message.id,
+                                  Message.created_at,
+                                  Message.event_type,
+                                  Message.payload,
+                                  Message.services)\
+                           .filter(Message.id.in_(subquery))
         else:
             subquery = subquery.order_by(Message.created_at).limit(bulk)
-
-        query = session.query(Message.id,
-                              Message.created_at,
-                              Message.event_type,
-                              Message.payload)\
-            .filter(Message.id.in_(subquery))\
-            .with_for_update(nowait=True)
+            query = session.query(Message.id,
+                                  Message.created_at,
+                                  Message.event_type,
+                                  Message.payload,
+                                  Message.services)\
+                           .filter(Message.id.in_(subquery))\
+                           .with_for_update(nowait=True)
 
         # Step 2:
         # MySQL does not support limits in nested queries, limit on the outer query instead.
@@ -106,10 +134,11 @@ def retrieve_messages(bulk=1000, thread=None, total_threads=None, event_type=Non
 
         # Step 3:
         # Assemble message object
-        for id, created_at, event_type, payload in query:
+        for id, created_at, event_type, payload, services in query:
             message = {'id': id,
                        'created_at': created_at,
-                       'event_type': event_type}
+                       'event_type': event_type,
+                       'services': services}
 
             # Only switch SQL context when necessary
             if payload == 'nolimit':
@@ -163,3 +192,29 @@ def truncate_messages(session=None):
         session.query(Message).delete(synchronize_session=False)
     except IntegrityError as e:
         raise RucioException(e.args)
+
+
+@transactional_session
+def update_messages_services(messages, services, session=None):
+    """
+    Update the services for all messages with the given IDs.
+
+    :param messages: The messages to delete as a list of dictionaries.
+    :param services: A coma separated string containing the list of services to report to.
+    :param session: The database session to use.
+    """
+    message_condition = []
+    for message in messages:
+        message_condition.append(Message.id == message['id'])
+        if len(message['payload']) > 4000:
+            message['payload_nolimit'] = message.pop('payload')
+
+    try:
+        if message_condition:
+            session.query(Message).\
+                with_hint(Message, "index(messages MESSAGES_ID_PK)", 'oracle').\
+                filter(or_(*message_condition)).\
+                update({'services': services}, synchronize_session=False)
+
+    except IntegrityError as err:
+        raise RucioException(err.args)

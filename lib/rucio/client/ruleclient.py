@@ -18,8 +18,14 @@
 # - Cedric Serfon <cedric.serfon@cern.ch>, 2014-2015
 # - Ralph Vigne <ralph.vigne@cern.ch>, 2015
 # - Joaquin Bogado <jbogado@linti.unlp.edu.ar>, 2018
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
 #
 # PY3K COMPATIBLE
+
+try:
+    from urllib import quote_plus
+except ImportError:
+    from urllib.parse import quote_plus
 
 from json import dumps, loads
 from requests.status_codes import codes
@@ -35,8 +41,8 @@ class RuleClient(BaseClient):
 
     RULE_BASEURL = 'rules'
 
-    def __init__(self, rucio_host=None, auth_host=None, account=None, ca_cert=None, auth_type=None, creds=None, timeout=600, dq2_wrapper=False):
-        super(RuleClient, self).__init__(rucio_host, auth_host, account, ca_cert, auth_type, creds, timeout, dq2_wrapper)
+    def __init__(self, rucio_host=None, auth_host=None, account=None, ca_cert=None, auth_type=None, creds=None, timeout=600, dq2_wrapper=False, vo=None):
+        super(RuleClient, self).__init__(rucio_host, auth_host, account, ca_cert, auth_type, creds, timeout, dq2_wrapper, vo=vo)
 
     def add_replication_rule(self, dids, copies, rse_expression, weight=None, lifetime=None, grouping='DATASET', account=None,
                              locked=False, source_replica_expression=None, activity=None, notify='N', purge_replicas=False,
@@ -205,7 +211,7 @@ class RuleClient(BaseClient):
         :param scope: The scope of the DID.
         :param name: The name of the DID.
         """
-        path = self.RULE_BASEURL + '/' + scope + '/' + name + '/history'
+        path = '/'.join([self.RULE_BASEURL, quote_plus(scope), quote_plus(name), 'history'])
         url = build_url(choice(self.list_hosts), path=path)
         r = self._send_request(url, type='GET')
         if r.status_code == codes.ok:
@@ -242,3 +248,20 @@ class RuleClient(BaseClient):
             return self._load_json_data(r)
         exc_cls, exc_msg = self._get_exception(r.headers, r.status_code)
         raise exc_cls(exc_msg)
+
+    def list_replication_rules(self, filters=None):
+        """
+        List all replication rules which match a filter
+        :param filters: dictionary of attributes by which the rules should be filtered
+
+        :returns: True if successful, otherwise false.
+        """
+        filters = filters or {}
+        path = self.RULE_BASEURL + '/'
+        url = build_url(choice(self.list_hosts), path=path)
+        r = self._send_request(url, type='GET', params=filters)
+        if r.status_code == codes.ok:
+            return self._load_json_data(r)
+        else:
+            exc_cls, exc_msg = self._get_exception(headers=r.headers, status_code=r.status_code, data=r.content)
+            raise exc_cls(exc_msg)

@@ -1,5 +1,6 @@
-#!/usr/bin/env python
-# Copyright 2012-2018 CERN for the benefit of the ATLAS collaboration.
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Copyright 2012-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,24 +15,29 @@
 # limitations under the License.
 #
 # Authors:
-# - Mario Lassnig <mario.lassnig@cern.ch>, 2012-2018
+# - Mario Lassnig <mario.lassnig@cern.ch>, 2012-2020
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
-#
-# PY3K COMPATIBLE
+# - James Perry <j.perry@epcc.ed.ac.uk>, 2019
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
+# - Eli Chadwick <eli.chadwick@stfc.ac.uk>, 2020
+# - Martin Barisits <martin.barisits@cern.ch>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
 from __future__ import print_function
+
 from traceback import format_exc
+
+from web import application, ctx, OK, header, InternalError, loadhook, unloadhook
+
+from rucio.api.credential import get_signed_url
+from rucio.common.exception import RucioException
+from rucio.web.rest.common import RucioController, check_accept_header_wrapper, rucio_loadhook, rucio_unloadhook
+from rucio.web.rest.utils import generate_http_error
+
 try:
     from urlparse import parse_qs
 except ImportError:
     from urllib.parse import parse_qs
-from web import application, ctx, OK, header, InternalError
-
-from rucio.api.authentication import validate_auth_token
-from rucio.api.credential import get_signed_url
-from rucio.common.exception import RucioException
-from rucio.common.utils import generate_http_error
-from rucio.web.rest.common import RucioController, check_accept_header_wrapper
 
 URLS = (
     '/signurl?$', 'SignURL',
@@ -70,12 +76,14 @@ class SignURL(RucioController):
             406 Not Acceptable
             500 Internal Server Error
 
+        :param Rucio-VO: VO name as a string (Multi-VO only).
         :param Rucio-Account: Account identifier as a string.
         :param Rucio-AppID: Application identifier as a string.
 
         :returns: Signed URL.
         """
 
+        vo = ctx.env.get('HTTP_X_RUCIO_VO', 'def')
         account = ctx.env.get('HTTP_X_RUCIO_ACCOUNT')
         appid = ctx.env.get('HTTP_X_RUCIO_APPID')
         if appid is None:
@@ -83,14 +91,6 @@ class SignURL(RucioController):
         ip = ctx.env.get('HTTP_X_FORWARDED_FOR')
         if ip is None:
             ip = ctx.ip
-
-        try:
-            validate_auth_token(ctx.env.get('HTTP_X_RUCIO_AUTH_TOKEN'))
-        except RucioException as e:
-            raise generate_http_error(500, e.__class__.__name__, e.args[0][0])
-        except Exception as e:
-            print(format_exc())
-            raise InternalError(e)
 
         rse, svc, operation, url = None, None, None, None
         try:
@@ -116,7 +116,7 @@ class SignURL(RucioController):
             raise generate_http_error(400, 'ValueError', 'Parameter "op" must be either empty(=read), read, write, or delete.')
 
         try:
-            result = get_signed_url(account, appid, ip, rse=rse, service=service, operation=operation, url=url, lifetime=lifetime)
+            result = get_signed_url(account, appid, ip, rse=rse, service=service, operation=operation, url=url, lifetime=lifetime, vo=vo)
         except RucioException as e:
             raise generate_http_error(500, e.__class__.__name__, e.args[0])
         except Exception as e:
@@ -134,4 +134,6 @@ class SignURL(RucioController):
 ----------------------"""
 
 APP = application(URLS, globals())
+APP.add_processor(loadhook(rucio_loadhook))
+APP.add_processor(unloadhook(rucio_unloadhook))
 application = APP.wsgifunc()

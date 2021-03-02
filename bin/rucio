@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2012-2018 CERN for the benefit of the ATLAS collaboration.
+# Copyright 2012-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,27 +14,33 @@
 # limitations under the License.
 #
 # Authors:
-# - Mario Lassnig, <mario.lassnig@cern.ch>, 2012-2019
-# - Vincent Garonne, <vgaronne@gmail.com>, 2012-2018
-# - Martin Barisits, <martin.barisits@cern.ch>, 2012-2019
-# - Thomas Beermann, <thomas.beermann@cern.ch>, 2012-2017
-# - Yun-Pin Sun, <winter0128@gmail.com>, 2012-2013
-# - Cedric Serfon, <cedric.serfon@cern.ch>, 2013-2018
-# - Ralph Vigne, <ralph.vigne@cern.ch>, 2013
-# - David Cameron, <d.g.cameron@gmail.com>, 2014
-# - Tomas Kouba, <tomas.kouba@cern.ch>, 2014
-# - Wen Guan, <wguan.icedew@gmail.com>, 2014
-# - Joaquin Bogado, <jbogado@linti.unlp.edu.ar>, 2014-2018
-# - Evangelia Liotiri, <evangelia.liotiri@cern.ch>, 2015
-# - Tobias Wegner, <twegner@cern.ch>, 2017-2019
-# - Brian Bockelman, <bbockelm@cse.unl.edu>, 2017-2018
-# - Nicolo Magini, <Nicolo.Magini@cern.ch>, 2018
-# - Frank Berghaus, <frank.berghaus@cern.ch>, 2018
-# - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
+# - Mario Lassnig <mario.lassnig@cern.ch>, 2012-2020
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2012-2018
+# - Martin Barisits <martin.barisits@cern.ch>, 2012-2020
+# - Thomas Beermann <thomas.beermann@cern.ch>, 2012-2017
+# - Yun-Pin Sun <winter0128@gmail.com>, 2012-2013
+# - Cedric Serfon <cedric.serfon@cern.ch>, 2013-2020
+# - Ralph Vigne <ralph.vigne@cern.ch>, 2013
+# - David Cameron <d.g.cameron@gmail.com>, 2014-2020
+# - Tomas Kouba <tomas.kouba@cern.ch>, 2014
+# - Wen Guan <wen.guan@cern.ch>, 2014
+# - Joaquin Bogado <jbogado@linti.unlp.edu.ar>, 2014-2018
+# - Evangelia Liotiri <evangelia.liotiri@cern.ch>, 2015
+# - Tobias Wegner <twegner@cern.ch>, 2017-2019
+# - Brian Bockelman <bbockelm@cse.unl.edu>, 2017-2018
+# - Frank Berghaus <frank.berghaus@cern.ch>, 2017-2018
+# - Nicolo Magini <nicolo.magini@cern.ch>, 2018
+# - Tomas Javurek <tomas.javurek@cern.ch>, 2018-2020
+# - asket <asket.agarwal96@gmail.com>, 2018
 # - Dimitrios Christidis <dimitrios.christidis@cern.ch>, 2018-2020
-# - Ruturaj Gujar, <ruturaj.gujar23@gmail.com>, 2019
-#
-# PY3K COMPATIBLE
+# - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
+# - Boris Bauermeister <boris.bauermeister@fysik.su.se>, 2019
+# - Ruturaj Gujar <ruturaj.gujar23@gmail.com>, 2019
+# - Jaroslav Guenther <jaroslav.guenther@cern.ch>, 2019-2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
+# - Jason Nielsen <jnielsen@ucsc.edu>, 2020
+# - Aristeidis Fkiaras <aristeidis.fkiaras@cern.ch>, 2020
+# - Patrick Austin <patrick.austin@stfc.ac.uk>, 2020
 
 from __future__ import print_function
 
@@ -47,28 +53,29 @@ import subprocess
 import sys
 import time
 import traceback
+import unittest
 import uuid
+from functools import wraps
 
 import argcomplete
 import tabulate
 
-try:
-    from ConfigParser import NoOptionError, NoSectionError
-except ImportError:
-    from configparser import NoOptionError, NoSectionError
-
-from functools import wraps
-
-from rucio.client.client import Client
-from rucio.client.uploadclient import UploadClient
-from rucio.client.downloadclient import DownloadClient
+# rucio module has the same name as this executable module, so this rule fails. pylint: disable=no-name-in-module
 from rucio import version
+from rucio.client import Client
 from rucio.common.config import config_get
 from rucio.common.exception import (DataIdentifierAlreadyExists, AccessDenied, DataIdentifierNotFound, InvalidObject,
                                     RSENotFound, InvalidRSEExpression, InputValidationError, DuplicateContent,
                                     RuleNotFound, CannotAuthenticate, MissingDependency, UnsupportedOperation,
                                     RucioException, DuplicateRule, InvalidType)
-from rucio.common.utils import sizefmt, Color, detect_client_location, chunks, parse_did_filter_from_string
+from rucio.common.utils import sizefmt, Color, detect_client_location, chunks, parse_did_filter_from_string, \
+    extract_scope, setup_logger
+from rucio.tests.test_rucio_server import TestRucioClient
+
+try:
+    from ConfigParser import NoOptionError, NoSectionError
+except ImportError:
+    from configparser import NoOptionError, NoSectionError
 
 SUCCESS = 0
 FAILURE = 1
@@ -76,39 +83,8 @@ FAILURE = 1
 DEFAULT_SECURE_PORT = 443
 DEFAULT_PORT = 80
 
-logger = logging.getLogger("user")
 gfal2_logger = logging.getLogger("gfal2")
 tablefmt = 'psql'
-
-
-def setup_logger(logger):
-    logger.setLevel(logging.INFO)
-    hdlr = logging.StreamHandler()
-
-    def emit_decorator(fnc):
-        def func(*args):
-            if 'RUCIO_LOGGING_FORMAT' not in os.environ:
-                levelno = args[0].levelno
-                if levelno >= logging.CRITICAL:
-                    color = '\033[31;1m'
-                elif levelno >= logging.ERROR:
-                    color = '\033[31;1m'
-                elif levelno >= logging.WARNING:
-                    color = '\033[33;1m'
-                elif levelno >= logging.INFO:
-                    color = '\033[32;1m'
-                elif levelno >= logging.DEBUG:
-                    color = '\033[36;1m'
-                else:
-                    color = '\033[0m'
-                formatter = logging.Formatter('{0}%(asctime)s\t%(levelname)s\t%(message)s\033[0m'.format(color))
-            else:
-                formatter = logging.Formatter(os.environ['RUCIO_LOGGING_FORMAT'])
-            hdlr.setFormatter(formatter)
-            return fnc(*args)
-        return func
-    hdlr.emit = emit_decorator(hdlr.emit)
-    logger.addHandler(hdlr)
 
 
 def setup_gfal2_logger(logger):
@@ -116,7 +92,6 @@ def setup_gfal2_logger(logger):
     logger.addHandler(logging.StreamHandler())
 
 
-setup_logger(logger)
 setup_gfal2_logger(gfal2_logger)
 
 
@@ -135,22 +110,15 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGINT, signal_handler)
 
 
-def extract_scope(did):
-    # Try to extract the scope from the DSN
-    if did.find(':') > -1:
-        if len(did.split(':')) > 2:
-            raise RucioException('Too many colons. Cannot extract scope and name')
-        scope, name = did.split(':')[0], did.split(':')[1]
-        if name.endswith('/'):
-            name = name[:-1]
+def get_scope(did, client):
+    try:
+        scope, name = extract_scope(did)
         return scope, name
-    else:
-        scope = did.split('.')[0]
-        if did.startswith('user') or did.startswith('group'):
-            scope = ".".join(did.split('.')[0:2])
-        if did.endswith('/'):
-            did = did[:-1]
-        return scope, did
+    except TypeError:
+        scopes = client.list_scopes()
+        scope, name = extract_scope(did, scopes)
+        return scope, name
+    return None, did
 
 
 def exception_handler(function):
@@ -202,7 +170,7 @@ def exception_handler(function):
             logger.debug('This means one dependency is missing.')
             return error.error_code
         except KeyError as error:
-            if 'x-rucio-auth-token' in error:
+            if 'x-rucio-auth-token' in str(error):
                 used_account = None
                 try:  # get the configured account from the configuration file
                     used_account = '%s (from rucio.cfg)' % config_get('client', 'account')
@@ -242,31 +210,43 @@ def get_client(args):
     """
     Returns a new client object.
     """
-    if args.auth_strategy in ['userpass', 'saml']:
+    if not args.auth_strategy:
+        if 'RUCIO_AUTH_TYPE' in os.environ:
+            auth_type = os.environ['RUCIO_AUTH_TYPE'].lower()
+        else:
+            try:
+                auth_type = config_get('client', 'auth_type').lower()
+            except (NoOptionError, NoSectionError):
+                logger.error('Cannot get AUTH_TYPE')
+                sys.exit(FAILURE)
+    else:
+        auth_type = args.auth_strategy.lower()
+
+    if auth_type in ['userpass', 'saml'] and args.username is not None and args.password is not None:
         creds = {'username': args.username, 'password': args.password}
+    elif auth_type == 'oidc':
+        if args.oidc_issuer:
+            args.oidc_issuer = args.oidc_issuer.lower()
+        creds = {'oidc_auto': args.oidc_auto,
+                 'oidc_scope': args.oidc_scope,
+                 'oidc_audience': args.oidc_audience,
+                 'oidc_polling': args.oidc_polling,
+                 'oidc_refresh_lifetime': args.oidc_refresh_lifetime,
+                 'oidc_issuer': args.oidc_issuer,
+                 'oidc_username': args.oidc_username,
+                 'oidc_password': args.oidc_password}
     else:
         creds = None
 
     try:
-        auth_type = args.auth_strategy.lower() if args.auth_strategy else args.auth_strategy
         client = Client(rucio_host=args.host, auth_host=args.auth_host,
                         account=args.account,
                         auth_type=auth_type, creds=creds,
                         ca_cert=args.ca_certificate, timeout=args.timeout,
-                        user_agent=args.user_agent)
+                        user_agent=args.user_agent, vo=args.vo)
     except CannotAuthenticate as error:
         logger.error(error)
-        auth_type = ''
-        if not args.auth_strategy:
-            if 'RUCIO_AUTH_TYPE' in os.environ:
-                auth_type = os.environ['RUCIO_AUTH_TYPE']
-            else:
-                try:
-                    auth_type = config_get('client', 'auth_type')
-                except (NoOptionError, NoSectionError):
-                    logger.error('Cannot get AUTH_TYPE')
-                    sys.exit(FAILURE)
-        if 'alert certificate expired' in error:
+        if 'alert certificate expired' in str(error):
             logger.error('The server certificate expired.')
         elif auth_type.lower() == 'x509_proxy':
             logger.error('Please verify that your proxy is still valid and renew it if needed.')
@@ -310,24 +290,49 @@ def list_dataset_replicas(args):
     List dataset replicas
     """
     client = get_client(args)
-    datasets, result = {}, {}
-    scope, name = extract_scope(args.did)
-    meta = client.get_metadata(scope, name)
-    if meta['did_type'] != 'DATASET':
-        dids = client.scope_list(scope=scope, name=name, recursive=True)
-        for did in dids:
-            if did['type'] == 'FILE':
-                dsn = '%s:%s' % (did['parent']['scope'], did['parent']['name'])
-                if dsn not in datasets:
-                    datasets[dsn] = 0
-                datasets[dsn] += 1
+    result = {}
+    datasets = []
+
+    def _append_to_datasets(scope, name):
+        filedid = {'scope': scope, 'name': name}
+        if filedid not in datasets:
+            datasets.append(filedid)
+
+    def _fetch_datasets_for_meta(meta):
+        """Internal function to fetch datasets and recurse into files."""
+        if meta['did_type'] != 'DATASET':
+            dids = client.scope_list(scope=meta['scope'], name=meta['name'], recursive=True)
+            for did in dids:
+                if did['type'] == 'FILE':
+                    _append_to_datasets(did['parent']['scope'], did['parent']['name'])
+        else:
+            _append_to_datasets(meta['scope'], meta['name'])
+
+    def _append_result(dsn, replica):
+        if dsn not in result:
+            result[dsn] = {}
+        result[dsn][replica['rse']] = [replica['rse'], replica['available_length'], replica['length']]
+
+    if len(args.dids) == 1:
+        scope, name = get_scope(args.dids[0], client)
+        dmeta = client.get_metadata(scope, name)
+        _fetch_datasets_for_meta(meta=dmeta)
     else:
-        datasets['%s:%s' % (scope, name)] = 0
-    for dsn in datasets:
-        scope, name = extract_scope(dsn)
-        result[dsn] = {}
-        for rep in client.list_dataset_replicas(scope, name, args.deep):
-            result[dsn][rep['rse']] = [rep['rse'], rep['available_length'], rep['length']]
+        extractdids = (get_scope(did, client) for did in args.dids)
+        splitdids = [{'scope': scope, 'name': name} for scope, name in extractdids]
+        for dmeta in client.get_metadata_bulk(dids=splitdids):
+            _fetch_datasets_for_meta(meta=dmeta)
+
+    if args.deep or len(datasets) < 2:
+        for did in datasets:
+            dsn = "%s:%s" % (did['scope'], did['name'])
+            for rep in client.list_dataset_replicas(scope=did['scope'], name=did['name'], deep=args.deep):
+                _append_result(dsn=dsn, replica=rep)
+    else:
+        for rep in client.list_dataset_replicas_bulk(dids=datasets):
+            dsn = "%s:%s" % (rep['scope'], rep['name'])
+            _append_result(dsn=dsn, replica=rep)
+
     if args.csv:
         for dsn in result:
             for rse in list(result[dsn].values()):
@@ -365,7 +370,7 @@ def list_file_replicas(args):
         return FAILURE
 
     for did in args.dids:
-        scope, name = extract_scope(did)
+        scope, name = get_scope(did, client)
         client.get_metadata(scope=scope, name=name)  # break with Exception before streaming replicas if DID does not exist
         dids.append({'scope': scope, 'name': name})
 
@@ -431,7 +436,7 @@ def add_dataset(args):
     Add a dataset identifier.
     """
     client = get_client(args)
-    scope, name = extract_scope(args.did)
+    scope, name = get_scope(args.did, client)
     client.add_dataset(scope=scope, name=name, statuses={'monotonic': args.monotonic}, lifetime=args.lifetime)
     print('Added %s:%s' % (scope, name))
     return SUCCESS
@@ -445,7 +450,7 @@ def add_container(args):
     Add a container identifier.
     """
     client = get_client(args)
-    scope, name = extract_scope(args.did)
+    scope, name = get_scope(args.did, client)
     client.add_container(scope=scope, name=name, statuses={'monotonic': args.monotonic}, lifetime=args.lifetime)
     print('Added %s:%s' % (scope, name))
     return SUCCESS
@@ -459,7 +464,7 @@ def attach(args):
     Attach a data identifier.
     """
     client = get_client(args)
-    scope, name = extract_scope(args.todid)
+    scope, name = get_scope(args.todid, client)
     dids = args.dids
     limit = 499
 
@@ -474,7 +479,7 @@ def attach(args):
             logger.error("Can't open file '" + dids[0] + "'.")
             return FAILURE
 
-    dids = [{'scope': extract_scope(did)[0], 'name': extract_scope(did)[1]} for did in dids]
+    dids = [{'scope': get_scope(did, client)[0], 'name': get_scope(did, client)[1]} for did in dids]
     if len(dids) <= limit:
         client.attach_dids(scope=scope, name=name, dids=dids)
     else:
@@ -504,10 +509,10 @@ def detach(args):
     Detach data identifier.
     """
     client = get_client(args)
-    scope, name = extract_scope(args.fromdid)
+    scope, name = get_scope(args.fromdid, client)
     dids = []
     for did in args.dids:
-        cscope, cname = extract_scope(did)
+        cscope, cname = get_scope(did, client)
         dids.append({'scope': cscope, 'name': cname})
     client.detach_dids(scope=scope, name=name, dids=dids)
     print('DIDs successfully detached from %s:%s' % (scope, name))
@@ -539,7 +544,7 @@ def list_dids(args):
             return FAILURE
 
     try:
-        scope, name = extract_scope(args.did[0])
+        scope, name = get_scope(args.did[0], client)
         if name == '':
             name = '*'
     except InvalidObject:
@@ -558,6 +563,60 @@ def list_dids(args):
     filters['name'] = name
 
     for did in client.list_dids(scope, filters=filters, type=type, long=True, recursive=args.recursive):
+        table.append(['%s:%s' % (did['scope'], did['name']), did['did_type']])
+
+    if args.short:
+        for did, dummy in table:
+            print(did)
+    else:
+        print(tabulate.tabulate(table, tablefmt=tablefmt, headers=['SCOPE:NAME', '[DID TYPE]']))
+    return SUCCESS
+
+
+@exception_handler
+def list_dids_extended(args):
+    """
+    %(prog)s list-dids-extended scope[:*|:name] [--filter 'key=value' | --recursive]
+
+    List the data identifiers for a given scope.
+    """
+    client = get_client(args)
+    filters = {}
+    type = 'collection'
+    table = []
+    if args.filter:
+        try:
+            filters, type = parse_did_filter_from_string(args.filter)
+        except InvalidType as error:
+            logger.error(error)
+            return FAILURE
+        except ValueError as error:
+            logger.error(error)
+            return FAILURE
+        except Exception:
+            logger.error("Invalid Filter. Filter must be 'key=value', 'key>=value', 'key>value', 'key<=value', 'key<value'")
+            return FAILURE
+
+    try:
+        scope, name = get_scope(args.did[0], client)
+        if name == '':
+            name = '*'
+    except InvalidObject:
+        scope = args.did[0]
+        name = '*'
+    if scope not in client.list_scopes():
+        logger.error('Scope not found')
+        return FAILURE
+
+    if args.recursive and '*' in name:
+        logger.error('Option recursive cannot be used with wildcards')
+        return FAILURE
+    elif ('name' in filters) and (name != '*'):
+        logger.error('You cannot use a wildcard query and a filter by name')
+        return FAILURE
+    filters['name'] = name
+
+    for did in client.list_dids_extended(scope, filters=filters, type=type, long=True, recursive=args.recursive):
         table.append(['%s:%s' % (did['scope'], did['name']), did['did_type']])
 
     if args.short:
@@ -593,7 +652,7 @@ def list_files(args):
     client = get_client(args)
     if args.csv:
         for did in args.dids:
-            scope, name = extract_scope(did)
+            scope, name = get_scope(did, client)
             for f in client.list_files(scope=scope, name=name):
                 guid = f['guid']
                 if guid:
@@ -618,7 +677,7 @@ def list_files(args):
  </File>'''
 
         for did in args.dids:
-            scope, name = extract_scope(did)
+            scope, name = get_scope(did, client)
             for f in client.list_files(scope=scope, name=name):
                 guid = f['guid']
                 if guid:
@@ -635,7 +694,7 @@ def list_files(args):
             totfiles = 0
             totsize = 0
             totevents = 0
-            scope, name = extract_scope(did)
+            scope, name = get_scope(did, client)
             for file in client.list_files(scope=scope, name=name):
                 totfiles += 1
                 totsize += int(file['bytes'])
@@ -665,7 +724,7 @@ def list_content(args):
     client = get_client(args)
     table = []
     for did in args.dids:
-        scope, name = extract_scope(did)
+        scope, name = get_scope(did, client)
         for content in client.list_content(scope=scope, name=name):
             table.append(['%s:%s' % (content['scope'], content['name']), content['type'].upper()])
     if args.short:
@@ -686,7 +745,7 @@ def list_content_history(args):
     client = get_client(args)
     table = []
     for did in args.dids:
-        scope, name = extract_scope(did)
+        scope, name = get_scope(did, client)
         for content in client.list_content_history(scope=scope, name=name):
             table.append(['%s:%s' % (content['scope'], content['name']), content['type'].upper()])
     print(tabulate.tabulate(table, tablefmt=tablefmt, headers=['SCOPE:NAME', '[DID TYPE]']))
@@ -733,7 +792,7 @@ def list_parent_dids(args):
             print('Parents : ', ','.join(dict_datasets[guid]))
     elif args.did:
         table = []
-        scope, name = extract_scope(args.did)
+        scope, name = get_scope(args.did, client)
         for dataset in client.list_parent_dids(scope=scope, name=name):
             table.append(['%s:%s' % (dataset['scope'], dataset['name']), dataset['type']])
         print(tabulate.tabulate(table, tablefmt=tablefmt, headers=['SCOPE:NAME', '[DID TYPE]']))
@@ -752,7 +811,7 @@ def close(args):
     """
     client = get_client(args)
     for did in args.dids:
-        scope, name = extract_scope(did)
+        scope, name = get_scope(did, client)
         client.set_status(scope=scope, name=name, open=False)
         print('%(scope)s:%(name)s has been closed.' % locals())
     return SUCCESS
@@ -767,7 +826,7 @@ def reopen(args):
     """
     client = get_client(args)
     for did in args.dids:
-        scope, name = extract_scope(did)
+        scope, name = get_scope(did, client)
         client.set_status(scope=scope, name=name, open=True)
         print('%(scope)s:%(name)s has been reopened.' % locals())
     return SUCCESS
@@ -784,7 +843,7 @@ def stat(args):
     for i, did in enumerate(args.dids):
         if i > 0:
             print('------')
-        scope, name = extract_scope(did)
+        scope, name = get_scope(did, client)
         info = client.get_did(scope=scope, name=name)
         table = [(k + ':', str(v)) for (k, v) in sorted(info.items())]
         print(tabulate.tabulate(table, tablefmt='plain'))
@@ -803,7 +862,7 @@ def erase(args):
             logger.warning("This command doesn't support wildcards! Skipping DID: %s" % did)
             continue
         try:
-            scope, name = extract_scope(did)
+            scope, name = get_scope(did, client)
         except RucioException as error:
             logger.warning('DID is in wrong format: %s' % did)
             logger.debug('Error: %s' % error)
@@ -878,6 +937,7 @@ def upload(args):
         raise InputValidationError('Invalid input argument composition')
 
     client = get_client(args)
+    from rucio.client.uploadclient import UploadClient
     upload_client = UploadClient(client, logger)
     summary_file_path = 'rucio_upload.json' if args.summary else None
     upload_client.upload(items, summary_file_path)
@@ -925,6 +985,7 @@ def download(args):
         trace_pattern['usrdn'] = args.trace_usrdn
 
     client = get_client(args)
+    from rucio.client.downloadclient import DownloadClient
     download_client = DownloadClient(client=client, logger=logger, check_admin=args.allow_tape)
 
     result = None
@@ -1019,10 +1080,10 @@ def download(args):
         downloaded_files = summary[summary_key]['DONE']
         local_files = summary[summary_key]['ALREADY_DONE']
         not_downloaded_files = ds_total - downloaded_files - local_files
-        print('{0:40} {1:6d}'.format('Total files : ', ds_total))
-        print('{0:40} {1:6d}'.format('Downloaded files : ', downloaded_files))
-        print('{0:40} {1:6d}'.format('Files already found locally : ', local_files))
-        print('{0:40} {1:6d}'.format('Files that cannot be downloaded : ', not_downloaded_files))
+        print('{0:40} {1:6d}'.format('Total files: ', ds_total))
+        print('{0:40} {1:6d}'.format('Downloaded files: ', downloaded_files))
+        print('{0:40} {1:6d}'.format('Files already found locally: ', local_files))
+        print('{0:40} {1:6d}'.format('Files that cannot be downloaded: ', not_downloaded_files))
 
     return SUCCESS
 
@@ -1035,11 +1096,16 @@ def get_metadata(args):
     Get data identifier metadata
     """
     client = get_client(args)
+    if args.plugin:
+        plugin = args.plugin
+    else:
+        plugin = 'DID_COLUMN'
+
     for i, did in enumerate(args.dids):
         if i > 0:
             print('------')
-        scope, name = extract_scope(did)
-        meta = client.get_metadata(scope=scope, name=name)
+        scope, name = get_scope(did, client)
+        meta = client.get_metadata(scope=scope, name=name, plugin=plugin)
         table = [(k + ':', str(v)) for (k, v) in sorted(meta.items())]
         print(tabulate.tabulate(table, tablefmt='plain'))
     return SUCCESS
@@ -1056,60 +1122,21 @@ def set_metadata(args):
     value = args.value
     if args.key == 'lifetime':
         value = float(args.value)
-    scope, name = extract_scope(args.did)
+    scope, name = get_scope(args.did, client)
     client.set_metadata(scope=scope, name=name, key=args.key, value=value)
     return SUCCESS
 
 
+@exception_handler
 def delete_metadata(args):
     """
     %(prog)s set_metadata [options] <field1=value1 field2=value2 ...>
 
     Delete data identifier metadata
     """
-    # For the moment..
-    raise NotImplementedError
-
-
-@exception_handler
-def get_did_meta(args):
-    """
-    %(prog)s get-did-meta [options] <field1=value1 field2=value2 ...>
-
-    Get data identifier metadata
-    """
     client = get_client(args)
-    for did in args.dids:
-        scope, name = extract_scope(did)
-        meta = client.get_did_meta(scope=scope, name=name)
-        for k in meta:
-            print('%s: %s' % (k, meta[k]))
-    return SUCCESS
-
-
-@exception_handler
-def add_did_meta(args):
-    """
-    %(prog)s add-did-meta [options] <field1=value1 field2=value2 ...>
-
-    Add or update data identifier metadata
-    """
-    client = get_client(args)
-    scope, name = extract_scope(args.did)
-    client.add_did_meta(scope=scope, name=name, meta={args.key: args.value})
-    return SUCCESS
-
-
-@exception_handler
-def delete_did_meta(args):
-    """
-    %(prog)s delete-did-meta [options] <field1=value1 field2=value2 ...>
-
-    Add or update data identifier metadata
-    """
-    client = get_client(args)
-    scope, name = extract_scope(args.did)
-    client.delete_did_meta(scope=scope, name=name, key=args.key)
+    scope, name = get_scope(args.did, client)
+    client.delete_metadata(scope=scope, name=name, key=args.key)
     return SUCCESS
 
 
@@ -1131,9 +1158,9 @@ def list_dids_by_meta(args):
             select[key] = value
     dids = client.list_dids_by_meta(scope=args.scope, select=select)
     if not dids:
-        logger.info('No DIDs found.')
+        print('No DIDs found.')
     for did in dids:
-        logger.info('%s:%s' % (did['scope'], did['name']))
+        print('%s:%s' % (did['scope'], did['name']))
     return SUCCESS
 
 
@@ -1148,7 +1175,7 @@ def add_rule(args):
     dids = []
     rule_ids = []
     for did in args.dids:
-        scope, name = extract_scope(did)
+        scope, name = get_scope(did, client)
         dids.append({'scope': scope, 'name': name})
     try:
         rule_ids = client.add_replication_rule(dids=dids,
@@ -1184,7 +1211,7 @@ def add_rule(args):
                                                           ask_approval=args.ask_approval,
                                                           asynchronous=args.asynchronous)
                     rule_ids.extend(rule_id)
-                except DuplicateRule as error:
+                except DuplicateRule:
                     print('Duplicate rule for %s:%s found; Skipping.' % (did['scope'], did['name']))
         else:
             raise error
@@ -1211,7 +1238,7 @@ def delete_rule(args):
         if not args.rse_expression:
             logger.error('A RSE expression must be specified if you do not provide a rule_id but a DID')
             return FAILURE
-        scope, name = extract_scope(args.rule_id)
+        scope, name = get_scope(args.rule_id, client)
         rules = client.list_did_rules(scope=scope, name=name)
         if args.rule_account is None:
             account = client.account
@@ -1353,16 +1380,16 @@ def list_rules(args):
     if args.rule_id:
         rules = [client.get_replication_rule(args.rule_id)]
     elif args.file:
-        scope, name = extract_scope(args.file)
+        scope, name = get_scope(args.file, client)
         rules = client.list_associated_rules_for_file(scope=scope, name=name)
     elif args.traverse:
-        scope, name = extract_scope(args.did)
+        scope, name = get_scope(args.did, client)
         locks = client.get_dataset_locks(scope=scope, name=name)
         rules = []
         for rule_id in list(set([lock['rule_id'] for lock in locks])):
             rules.append(client.get_replication_rule(rule_id))
     elif args.did:
-        scope, name = extract_scope(args.did)
+        scope, name = get_scope(args.did, client)
         meta = client.get_metadata(scope=scope, name=name)
         rules = client.list_did_rules(scope=scope, name=name)
         try:
@@ -1424,7 +1451,7 @@ def list_rules_history(args):
     """
     rule_dict = []
     client = get_client(args)
-    scope, name = extract_scope(args.did)
+    scope, name = get_scope(args.did, client)
     for rule in client.list_replication_rule_full_history(scope, name):
         if rule['rule_id'] not in rule_dict:
             rule_dict.append(rule['rule_id'])
@@ -1608,10 +1635,9 @@ def test_server(args):
     %(prog)s test-server [options] <field1=value1 field2=value2 ...>
     Test the client against a server.
     """
-    import nose
-    config = nose.config.Config()
-    config.verbosity = 2
-    nose.run(argv=sys.argv[1:], defaultTest='rucio.tests.test_rucio_server', config=config)
+    TestRucioClient.running_with_unittest = True
+    suite = unittest.TestLoader().loadTestsFromTestCase(TestRucioClient)
+    unittest.TextTestRunner(verbosity=2).run(suite)
     return SUCCESS
 
 
@@ -1623,7 +1649,7 @@ def touch(args):
     client = get_client(args)
 
     for did in args.dids:
-        scope, name = extract_scope(did)
+        scope, name = get_scope(did, client)
         client.touch(scope, name, args.rse)
 
 
@@ -1644,6 +1670,7 @@ def get_parser():
 
     # Main arguments
     oparser.add_argument('--version', action='version', version='%(prog)s ' + version.version_string())
+    oparser.add_argument('--config', dest="config", help="The Rucio configuration file to use.")
     oparser.add_argument('--verbose', '-v', default=False, action='store_true', help="Print more verbose output.")
     oparser.add_argument('-H', '--host', dest="host", metavar="ADDRESS", help="The Rucio API host.")
     oparser.add_argument('--auth-host', dest="auth_host", metavar="ADDRESS", help="The Rucio Authentication host.")
@@ -1652,10 +1679,27 @@ def get_parser():
     oparser.add_argument('-T', '--timeout', dest="timeout", type=float, default=None, help="Set all timeout values to seconds.")
     oparser.add_argument('--robot', '-R', dest="human", default=True, action='store_false', help="All output in bytes and without the units. This output format is preferred by parsers and scripts.")
     oparser.add_argument('--user-agent', '-U', dest="user_agent", default='rucio-clients', action='store', help="Rucio User Agent")
+    oparser.add_argument('--vo', dest="vo", metavar="VO", default=None, help="VO to authenticate at. Only used in multi-VO mode.")
 
-    # Options for the userpass auth_strategy
+    # Options for the userpass or OIDC auth_strategy
     oparser.add_argument('-u', '--user', dest='username', default=None, help='username')
     oparser.add_argument('-pwd', '--password', dest='password', default=None, help='password')
+    # Options for defining remaining OIDC parameters
+    oparser.add_argument('--oidc-user', dest='oidc_username', default=None, help='OIDC username')
+    oparser.add_argument('--oidc-password', dest='oidc_password', default=None, help='OIDC password')
+    oparser.add_argument('--oidc-scope', dest='oidc_scope', default='openid profile', help='Defines which (OIDC) information user will share with Rucio. '
+                         + 'Rucio requires at least -sc="openid profile". To request refresh token for Rucio, scope must include "openid offline_access" and '  # NOQA: W503
+                         + 'there must be no active access token saved on the side of the currently used Rucio Client.')  # NOQA: W503
+    oparser.add_argument('--oidc-audience', dest='oidc_audience', default=None, help='Defines which audience are tokens requested for.')
+    oparser.add_argument('--oidc-auto', dest='oidc_auto', default=False, action='store_true', help='If not specified, username and password credentials are not required and users will be given a URL '
+                         + 'to use in their browser. If specified, the users explicitly trust Rucio with their IdP credentials.')  # NOQA: W503
+    oparser.add_argument('--oidc-polling', dest='oidc_polling', default=False, action='store_true', help='If not specified, user will be asked to enter a code returned by the browser to the command line. '
+                         + 'If --polling is set, Rucio Client should get the token without any further interaction of the user. This option is active only if --auto is *not* specified.')  # NOQA: W503
+    oparser.add_argument('--oidc-refresh-lifetime', dest='oidc_refresh_lifetime', default=None, help='Max lifetime in hours for this an access token will be refreshed by asynchronous Rucio daemon. '
+                         + 'If not specified, refresh will be stopped after 4 days. This option is effective only if --oidc-scope includes offline_access scope for a refresh token to be granted to Rucio.')  # NOQA: W503
+    oparser.add_argument('--oidc-issuer', dest='oidc_issuer', default=None,
+                         help='Defines which Identity Provider is goign to be used. The issuer string must correspond '
+                         + 'to the keys configured in the /etc/idpsecrets.json auth server configuration file.')  # NOQA: W503
 
     # Options for the x509  auth_strategy
     oparser.add_argument('--certificate', dest='certificate', default=None, help='Client certificate file.')
@@ -1726,7 +1770,7 @@ To list the missing replica of a dataset of a given RSE::
     list_file_replicas_parser.add_argument('--missing', dest='missing', default=False, action='store_true', help='To list missing replicas at a RSE. Must be used with --rse option', required=False)
     list_file_replicas_parser.add_argument('--metalink', dest='metalink', default=False, action='store_true', help='Output available replicas as metalink.', required=False)
     list_file_replicas_parser.add_argument('--no-resolve-archives', dest='no_resolve_archives', default=False, action='store_true', help='Do not resolve archives which may contain the files.', required=False)
-    list_file_replicas_parser.add_argument('--sort', dest='sort', default=None, action='store', help='Replica sort algorithm. Available options: random (default), geoip', required=False)
+    list_file_replicas_parser.add_argument('--sort', dest='sort', default=None, action='store', help='Replica sort algorithm. Available options: geoip (default), random', required=False)
     list_file_replicas_parser.add_argument('--expression', dest='rse_expression', default=None, action='store', help='The RSE filter expression. A comprehensive help about RSE expressions\
             can be found in ' + Color.BOLD + 'http://rucio.cern.ch/client_tutorial.html#adding-rules-for-replication' + Color.END)
 
@@ -1748,7 +1792,7 @@ To list the missing replica of a dataset of a given RSE::
     +------------+---------+---------+
     ''')
     list_dataset_replicas_parser.set_defaults(function=list_dataset_replicas)
-    list_dataset_replicas_parser.add_argument(dest='did', action='store', help='The name of the DID to search.')
+    list_dataset_replicas_parser.add_argument(dest='dids', action='store', nargs='+', help='The name of the DID to search.')
     list_dataset_replicas_parser.add_argument('--deep', action='store_true', help='Make a deep check.')
     list_dataset_replicas_parser.add_argument('--csv', dest='csv', action='store_true', default=False, help='Comma Separated Value output.',)
 
@@ -1900,6 +1944,50 @@ You can filter by key/value, e.g.::
     list_parser.add_argument('--short', dest='short', action='store_true', help='Just dump the list of DIDs.')
     list_parser.add_argument(dest='did', nargs=1, action='store', default=None, help='Data IDentifier pattern')
 
+    # The extended version of list_dids that goes through the plugin mechanism
+    list_extended_parser = subparsers.add_parser('list-dids-extended',
+                                                 help='List the data identifiers matching some metadata (extended version to include metadata from various resources).',
+                                                 description='''List the Data IDentifiers matching certain pattern.
+Only the collections (i.e. dataset or container) are returned by default.
+With the filter option, you can specify a list of metadata that the Data IDentifier should match.
+Please use the filter option `--filter type=all` to find all types of Data IDentifiers.''',
+                                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog='''Usage example
+"""""""""""""
+
+You can query the DIDs matching a certain pattern. It always requires to specify the scope in which you want to search::
+
+    $ rucio list-dids --filter 'type=all' user.jdoe:*
+    +-------------------------------------------+--------------+
+    | SCOPE:NAME                                | [DID TYPE]   |
+    |-------------------------------------------+--------------|
+    | user.jdoe:user.jdoe.test.container.1234.1 | CONTAINER    |
+    | user.jdoe:user.jdoe.test.container.1234.2 | CONTAINER    |
+    | user.jdoe:user.jdoe.test.cont.1234.2      | CONTAINER    |
+    | user.jdoe:user.jdoe.test.dataset.1        | DATASET      |
+    | user.jdoe:user.jdoe.test.dataset.2        | DATASET      |
+    | user.jdoe:user.jdoe.test.data.1234.1      | DATASET      |
+    | user.jdoe:test.file.1                     | FILE         |
+    | user.jdoe:test.file.2                     | FILE         |
+    | user.jdoe:test.file.3                     | FILE         |
+    +-------------------------------------------+--------------+
+
+You can filter by key/value, e.g.::
+
+    $ rucio list-dids --filter 'type=CONTAINER'
+    +-------------------------------------------+--------------+
+    | SCOPE:NAME                                | [DID TYPE]   |
+    |-------------------------------------------+--------------|
+    | user.jdoe:user.jdoe.test.container.1234.1 | CONTAINER    |
+    | user.jdoe:user.jdoe.test.container.1234.2 | CONTAINER    |
+    | user.jdoe:user.jdoe.test.cont.1234.2      | CONTAINER    |
+    +-------------------------------------------+--------------+''')
+
+    list_extended_parser.set_defaults(function=list_dids_extended)
+    list_extended_parser.add_argument('--recursive', dest='recursive', action='store_true', default=False, help='List data identifiers recursively.')
+    list_extended_parser.add_argument('--filter', dest='filter', action='store', help='Filter arguments in form `key=value,another_key>=next_value`. Valid keys are type and length. Use `type` to specify a DID type to search for. Valid values are `ALL`, `COLLECTION`, `CONTAINER`, `DATASET`, `FILE`. Use `length` to filter for an amount of corresponding Data IDentifiers. Valid operators are `=`, `>`, `>=`, `<`, `<=`.')  # noqa: E501
+    list_extended_parser.add_argument('--short', dest='short', action='store_true', help='Just dump the list of DIDs.')
+    list_extended_parser.add_argument(dest='did', nargs=1, action='store', default=None, help='Data IDentifier pattern')
+
     # The list parent-dids command
     list_parent_parser = subparsers.add_parser('list-parent-dids', help='List parent DIDs for a given DID', description='List all parents Data IDentifier that contains the target Data IDentifier.',
                                                formatter_class=argparse.RawDescriptionHelpFormatter, epilog='''Usage example
@@ -1979,7 +2067,7 @@ You can filter by key/value, e.g.::
 
     # The list_files command
     list_files_parser = subparsers.add_parser('list-files', help='List DID contents', description='List all the files in a Data IDentifier. The DID can be a container, dataset or a file.\
-                                                                  What is returned is a list of files in the DID with : <scope>:<name>\t<filesize>\t<checksum>\t<guid>')
+                                                                  What is returned is a list of files in the DID with : <scope>:<name>\t<guid>\t<checksum>\t<filesize>')
     list_files_parser.set_defaults(function=list_files)
     list_files_parser.add_argument('--csv', dest='csv', action='store_true', default=False, help='Comma Separated Value output. This output format is preferred for easy parsing and scripting.')
     list_files_parser.add_argument('--pfc', dest='LOCALPATH', action='store', default=False, help='Outputs the list of files in the dataset with the LOCALPATH prepended as a PoolFileCatalog')
@@ -2010,7 +2098,7 @@ You can filter by key/value, e.g.::
     upload_parser.add_argument('--protocol', action='store', help='Force the protocol to use')
     upload_parser.add_argument('--pfn', dest='pfn', action='store', help='Specify the exact PFN for the upload.')
     upload_parser.add_argument('--name', dest='name', action='store', help='Specify the exact LFN for the upload.')
-    upload_parser.add_argument('--transfer-timeout', dest='transfer_timeout', type=float, action='store', default=config_get('upload', 'transfer_timeout', False, 3600), help='Transfer timeout (in seconds).')
+    upload_parser.add_argument('--transfer-timeout', dest='transfer_timeout', type=float, action='store', default=config_get('upload', 'transfer_timeout', False, 360), help='Transfer timeout (in seconds).')
     upload_parser.add_argument(dest='args', action='store', nargs='+', help='files and datasets.')
 
     # The download and get subparser
@@ -2029,7 +2117,7 @@ You can filter by key/value, e.g.::
         selected_parser.add_argument('--pfn', dest='pfn', action='store', help="Specify the exact PFN for the download.")
         selected_parser.add_argument('--archive-did', action='store', dest='archive_did', help="Download from archive is transparent. This option is obsolete.")
         selected_parser.add_argument('--no-resolve-archives', action='store_true', default=False, help="If set archives will not be considered for download.")
-        selected_parser.add_argument('--transfer-timeout', dest='transfer_timeout', type=float, action='store', default=config_get('download', 'transfer_timeout', False, 3600), help='Transfer timeout (in seconds).')
+        selected_parser.add_argument('--transfer-timeout', dest='transfer_timeout', type=float, action='store', default=config_get('download', 'transfer_timeout', False, 360), help='Transfer timeout (in seconds).')
         selected_parser.add_argument('--aria', action='store_true', default=False, help="Use aria2c utility if possible. (EXPERIMENTAL)")
         selected_parser.add_argument('--trace_appid', dest='trace_appid', action='store', default=os.environ.get('RUCIO_TRACE_APPID', None), help=argparse.SUPPRESS)
         selected_parser.add_argument('--trace_dataset', dest='trace_dataset', action='store', default=os.environ.get('RUCIO_TRACE_DATASET', None), help=argparse.SUPPRESS)
@@ -2046,6 +2134,7 @@ You can filter by key/value, e.g.::
     get_metadata_parser = subparsers.add_parser('get-metadata', help='Get metadata for DIDs.')
     get_metadata_parser.set_defaults(function=get_metadata)
     get_metadata_parser.add_argument(dest='dids', nargs='+', action='store', help='List of space separated data identifiers.')
+    get_metadata_parser.add_argument('--plugin', dest='plugin', action='store', help='Filter down to metdata from specific metadata plugin', required=False)
 
     # The set-metadata subparser
     set_metadata_parser = subparsers.add_parser('set-metadata', help='set-metadata method')
@@ -2054,29 +2143,11 @@ You can filter by key/value, e.g.::
     set_metadata_parser.add_argument('--key', dest='key', action='store', help='Attribute key', required=True)
     set_metadata_parser.add_argument('--value', dest='value', action='store', help='Attribute value', required=True)
 
-    # The get-did-meta subparser
-    get_did_meta_parser = subparsers.add_parser('get-did-meta', help='Get generic metadata for DIDs.')
-    get_did_meta_parser.set_defaults(function=get_did_meta)
-    get_did_meta_parser.add_argument(dest='dids', nargs='+', action='store', help='List of space separated data identifiers.')
-
-    # Add add-did-meta subparser
-    add_did_meta_parser = subparsers.add_parser('add-did-meta', help='Add or update metadata')
-    add_did_meta_parser.set_defaults(function=add_did_meta)
-    add_did_meta_parser.add_argument('--did', dest='did', action='store', help='Data identifier to which the metadata will be added', required=True)
-    add_did_meta_parser.add_argument('--key', dest='key', action='store', help='Attribute key', required=True)
-    add_did_meta_parser.add_argument('--value', dest='value', action='store', help='Attribute value', required=True)
-
     # delete-did-meta subparser
-    delete_did_meta_parser = subparsers.add_parser('delete-did-meta', help='delete metadata')
-    delete_did_meta_parser.set_defaults(function=delete_did_meta)
-    delete_did_meta_parser.add_argument('--did', dest='did', action='store', help='Data identifier to delete', required=True)
-    delete_did_meta_parser.add_argument('--key', dest='key', action='store', help='Attribute key', required=True)
-
-    # Get dids by metadata key value
-    list_dids_by_meta_parser = subparsers.add_parser('list-dids-by-meta', help='list dids by a key value pairs')
-    list_dids_by_meta_parser.set_defaults(function=list_dids_by_meta)
-    list_dids_by_meta_parser.add_argument(dest='key_values', nargs='+', action='store', help='KeyValue pairs')
-    list_dids_by_meta_parser.add_argument('--scope', dest='scope', action='store', default=None, help='The scope of the search.')
+    delete_metadata_parser = subparsers.add_parser('delete-metadata', help='delete metadata')
+    delete_metadata_parser.set_defaults(function=delete_metadata)
+    delete_metadata_parser.add_argument('--did', dest='did', action='store', help='Data identifier to delete', required=True)
+    delete_metadata_parser.add_argument('--key', dest='key', action='store', help='Attribute key', required=True)
 
     # The list-rse-usage subparser
     list_rse_usage_parser = subparsers.add_parser('list-rse-usage', help='Shows the total/free/used space for a given RSE. This values can differ for different RSE source.')
@@ -2209,7 +2280,7 @@ can be found in ' + Color.BOLD + 'http://rucio.cern.ch/client_tutorial.html#addi
     list_datasets_rse_parser.add_argument('--long', dest='long', action='store_true', default=False, help='The long option')
 
     # The test-server command
-    test_server_parser = subparsers.add_parser('test-server', help='Test Server', description='Run a battery of nosetests against the Rucio Servers.')
+    test_server_parser = subparsers.add_parser('test-server', help='Test Server', description='Run a bunch of tests against the Rucio Servers.')
     test_server_parser.set_defaults(function=test_server)
 
     # The get-metadata subparser
@@ -2222,6 +2293,12 @@ can be found in ' + Color.BOLD + 'http://rucio.cern.ch/client_tutorial.html#addi
 
 
 if __name__ == '__main__':
+    arguments = sys.argv[1:]
+    # set the configuration before anything else, if the config parameter is present
+    for argi in range(len(arguments)):
+        if arguments[argi] == '--config' and (argi + 1) < len(arguments):
+            os.environ['RUCIO_CONFIG'] = arguments[argi + 1]
+
     oparser = get_parser()
     argcomplete.autocomplete(oparser)
 
@@ -2229,11 +2306,11 @@ if __name__ == '__main__':
         oparser.print_help()
         sys.exit(FAILURE)
 
-    args = oparser.parse_args(sys.argv[1:])
+    args = oparser.parse_args(arguments)
 
+    logger = None
     try:
-        if args.verbose:
-            logger.setLevel(logging.DEBUG)
+        logger = setup_logger(module_name=__name__, logger_name='user', verbose=args.verbose)
         start_time = time.time()
         result = args.function(args)
         end_time = time.time()

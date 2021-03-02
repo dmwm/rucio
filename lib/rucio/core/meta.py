@@ -1,21 +1,29 @@
-'''
-  Copyright European Organization for Nuclear Research (CERN)
-
-  Licensed under the Apache License, Version 2.0 (the "License");
-  You may not use this file except in compliance with the License.
-  You may obtain a copy of the License at
-  http://www.apache.org/licenses/LICENSE-2.0
-
-  Authors:
-  - Vincent Garonne, <vincent.garonne@cern.ch>, 2012-2015
-  - Mario Lassnig, <mario.lassnig@cern.ch>, 2013
-  - Hannes Hansen, <hannes.jakob.hansen@cern.ch>, 2018
-
-  PY3K COMPATIBLE
-'''
+# -*- coding: utf-8 -*-
+# Copyright 2012-2020 CERN
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Authors:
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2012-2015
+# - Mario Lassnig <mario.lassnig@cern.ch>, 2013-2020
+# - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018
+# - Patrick Austin <patrick.austin@stfc.ac.uk>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
+# - Martin Barisits <martin.barisits@cern.ch>, 2020
 
 from __future__ import print_function
 from re import match
+from six import string_types
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.exc import NoResultFound
@@ -46,7 +54,11 @@ def add_key(key, key_type, value_type=None, value_regexp=None, session=None):
         raise UnsupportedValueType('The type \'%(value_type)s\' is not supported for values!' % locals())
 
     # Convert key_type
-    key_type = str(key_type)
+    if isinstance(key_type, string_types):
+        key_type = str(key_type)
+    else:
+        key_type = str(key_type.value)
+
     if key_type == 'F':
         key_type = 'FILE'
     elif key_type == 'D':
@@ -55,15 +67,21 @@ def add_key(key, key_type, value_type=None, value_regexp=None, session=None):
         key_type = 'CONTAINER'
 
     try:
-        key_type = KeyType.from_string(key_type)
-    except ValueError as error:
+        key_type = KeyType(key_type)
+    except ValueError:
         raise UnsupportedKeyType('The type \'%s\' is not supported for keys!' % str(key_type))
 
     new_key = models.DIDKey(key=key, value_type=value_type and str(value_type), value_regexp=value_regexp, key_type=key_type)
     try:
         new_key.save(session=session)
     except IntegrityError as error:
-        if error.args[0] == "(IntegrityError) column key is not unique":
+        if ('UNIQUE constraint failed' in error.args[0]) \
+           or ('conflicts with persistent instance' in error.args[0]) \
+           or match('.*IntegrityError.*ORA-00001: unique constraint.*DID_KEYS_PK.*violated.*', error.args[0]) \
+           or match('.*IntegrityError.*1062.*Duplicate entry.*for key.*', error.args[0]) \
+           or match('.*IntegrityError.*duplicate key value violates unique constraint.*', error.args[0]) \
+           or match('.*UniqueViolation.*duplicate key value violates unique constraint.*', error.args[0]) \
+           or match('.*IntegrityError.*columns? key.*not unique.*', error.args[0]):
             raise Duplicate('key \'%(key)s\' already exists!' % locals())
         raise
 
@@ -108,10 +126,15 @@ def add_value(key, value, session=None):
     try:
         new_value.save(session=session)
     except IntegrityError as error:
-        if error.args[0] == "(IntegrityError) columns key, value are not unique":
+        if ('UNIQUE constraint failed' in error.args[0]) \
+           or ('conflicts with persistent instance' in error.args[0]) \
+           or match('.*IntegrityError.*ORA-00001: unique constraint.*DID_KEYS_PK.*violated.*', error.args[0]) \
+           or match('.*IntegrityError.*1062.*Duplicate entry.*for key.*', error.args[0]) \
+           or match('.*IntegrityError.*duplicate key value violates unique constraint.*', error.args[0]) \
+           or match('.*UniqueViolation.*duplicate key value violates unique constraint.*', error.args[0]) \
+           or match('.*IntegrityError.*columns? key.*value.*not unique.*', error.args[0]):
             raise Duplicate('key-value \'%(key)s-%(value)s\' already exists!' % locals())
-
-        if error.args[0] == "(IntegrityError) foreign key constraint failed":
+        if match('.*IntegrityError.*foreign key constraints? failed.*', error.args[0]):
             raise KeyNotFound("key '%(key)s' does not exist!" % locals())
         if match('.*IntegrityError.*ORA-02291: integrity constraint.*DID_MAP_KEYS_FK.*violated.*', error.args[0]):
             raise KeyNotFound("key '%(key)s' does not exist!" % locals())

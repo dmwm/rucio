@@ -1,4 +1,4 @@
-# Copyright 2012-2018 CERN for the benefit of the ATLAS collaboration.
+# Copyright 2012-2020 CERN for the benefit of the ATLAS collaboration.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,8 +23,15 @@
 # - Ralph Vigne <ralph.vigne@cern.ch>, 2015
 # - Joaquin Bogado <jbogado@linti.unlp.edu.ar>, 2015
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 #
 # PY3K COMPATIBLE
+
+try:
+    from urllib import quote_plus
+except ImportError:
+    from urllib.parse import quote_plus
 
 from json import dumps
 from requests.status_codes import codes
@@ -40,8 +47,8 @@ class AccountClient(BaseClient):
 
     ACCOUNTS_BASEURL = 'accounts'
 
-    def __init__(self, rucio_host=None, auth_host=None, account=None, ca_cert=None, auth_type=None, creds=None, timeout=600, user_agent='rucio-clients'):
-        super(AccountClient, self).__init__(rucio_host, auth_host, account, ca_cert, auth_type, creds, timeout, user_agent)
+    def __init__(self, rucio_host=None, auth_host=None, account=None, ca_cert=None, auth_type=None, creds=None, timeout=600, user_agent='rucio-clients', vo=None):
+        super(AccountClient, self).__init__(rucio_host, auth_host, account, ca_cert, auth_type, creds, timeout, user_agent, vo=vo)
 
     def add_account(self, account, type, email):
         """
@@ -187,7 +194,7 @@ class AccountClient(BaseClient):
             exc_cls, exc_msg = self._get_exception(headers=res.headers, status_code=res.status_code, data=res.content)
             raise exc_cls(exc_msg)
 
-    def del_identity(self, account, identity, authtype, default=False):
+    def del_identity(self, account, identity, authtype):
         """
         Delete an identity's membership association with an account.
 
@@ -197,7 +204,7 @@ class AccountClient(BaseClient):
         :param default: If True, the account should be used by default with the provided identity.
         """
 
-        data = dumps({'identity': identity, 'authtype': authtype, 'default': default})
+        data = dumps({'identity': identity, 'authtype': authtype})
         path = '/'.join([self.ACCOUNTS_BASEURL, account, 'identities'])
 
         url = build_url(choice(self.list_hosts), path=path)
@@ -267,7 +274,7 @@ class AccountClient(BaseClient):
         :param rse_expression: The rse expression.
         """
 
-        path = '/'.join([self.ACCOUNTS_BASEURL, account, 'limits', 'global', rse_expression])
+        path = '/'.join([self.ACCOUNTS_BASEURL, account, 'limits', 'global', quote_plus(rse_expression)])
         url = build_url(choice(self.list_hosts), path=path)
         res = self._send_request(url, type='GET')
         if res.status_code == codes.ok:
@@ -348,7 +355,7 @@ class AccountClient(BaseClient):
         :param rse_expression: The rse expression.
         """
         if rse_expression:
-            path = '/'.join([self.ACCOUNTS_BASEURL, account, 'usage', 'global', rse_expression])
+            path = '/'.join([self.ACCOUNTS_BASEURL, account, 'usage', 'global', quote_plus(rse_expression)])
         else:
             path = '/'.join([self.ACCOUNTS_BASEURL, account, 'usage', 'global'])
         url = build_url(choice(self.list_hosts), path=path)

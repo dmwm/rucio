@@ -1,4 +1,4 @@
-# Copyright 2014-2019 CERN for the benefit of the ATLAS collaboration.
+# Copyright 2019-2020 CERN for the benefit of the ATLAS collaboration.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,13 +13,16 @@
 # limitations under the License.
 #
 # Authors:
-# - Tomas Javor Javurek <tomas.javurek@cern.ch>, 2019
+# - Tomas Javurek <tomas.javurek@cern.ch>, 2019-2020
+# - Boris Bauermeister <boris.bauermeister@fysik.su.se>, 2019
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
 # - Mario Lassnig <mario.lassnig@cern.ch>, 2019
+# - Eli Chadwick <eli.chadwick@stfc.ac.uk>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
 import os
 import requests
 
-from exceptions import NotImplementedError
 from xml.dom import minidom
 
 from rucio.common import exception
@@ -30,12 +33,12 @@ from rucio.rse.protocols import protocol
 class Default(protocol.RSEProtocol):
     """ Implementing access to RSEs using the local filesystem."""
 
-    def __init__(self, protocol_attr, rse_settings):
+    def __init__(self, protocol_attr, rse_settings, logger=None):
         """ Initializes the object with information about the referred RSE.
 
             :param props Properties derived from the RSE Repository
         """
-        super(Default, self).__init__(protocol_attr, rse_settings)
+        super(Default, self).__init__(protocol_attr, rse_settings, logger=logger)
         self.attributes.pop('determinism_type', None)
         self.files = []
 
@@ -55,7 +58,7 @@ class Default(protocol.RSEProtocol):
 
         lfns = [lfns] if isinstance(lfns, dict) else lfns
         for lfn in lfns:
-            path = lfn['path'] if 'path' in lfn and lfn['path'] else self._get_path(scope=lfn['scope'].external,
+            path = lfn['path'] if 'path' in lfn and lfn['path'] else self._get_path(scope=lfn['scope'],
                                                                                     name=lfn['name'])
             pfns['%s:%s' % (lfn['scope'], lfn['name'])] = ''.join(['storm://', hostname, ':', str(self.attributes['port']), prefix, path])
 
@@ -170,6 +173,7 @@ class Default(protocol.RSEProtocol):
         # make the symlink
         try:
             os.symlink(target, dest)
+            self.logger.info('StoRM protocol: {}->{}'.format(target, dest))
         except Exception as e:
             exception.ServiceUnavailable('Could not create symlink: %s for target %s' % (str(e), str(target)))
 

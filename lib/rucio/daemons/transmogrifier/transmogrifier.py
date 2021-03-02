@@ -1,4 +1,5 @@
-# Copyright 2013-2018 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2018-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,17 +14,17 @@
 # limitations under the License.
 #
 # Authors:
-# - Cedric Serfon <cedric.serfon@cern.ch>, 2013-2018
-# - Vincent Garonne <vgaronne@gmail.com>, 2014-2018
-# - David Cameron <d.g.cameron@gmail.com>, 2014
-# - Mario Lassnig <mario.lassnig@cern.ch>, 2015
-# - Wen Guan <wguan.icedew@gmail.com>, 2015
-# - Martin Barisits <martin.barisits@cern.ch>, 2016-2017
+# - Mario Lassnig <mario.lassnig@cern.ch>, 2018-2020
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018
+# - Robert Illingworth <illingwo@fnal.gov>, 2019
 # - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
-# - Brandon White <bjwhite@fnal.gov>, 2019-2020
-#
-# PY3K COMPATIBLE
+# - Brandon White <bjwhite@fnal.gov>, 2019
+# - Cedric Serfon <cedric.serfon@cern.ch>, 2020
+# - Patrick Austin <patrick.austin@stfc.ac.uk>, 2020
+# - Thomas Beermann <thomas.beermann@cern.ch>, 2020
+# - Eli Chadwick <eli.chadwick@stfc.ac.uk>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
+# - Eric Vaandering <ewv@fnal.gov>, 2020
 
 import logging
 import os
@@ -31,29 +32,29 @@ import re
 import socket
 import threading
 import time
-
 from datetime import datetime
 from json import loads
 from math import exp
-from sys import exc_info, stdout, argv
+from sys import exc_info, stdout
 from traceback import format_exception
 
-
-from rucio.db.sqla.constants import DIDType, SubscriptionState
-from rucio.common.exception import (DatabaseException, DataIdentifierNotFound, InvalidReplicationRule, DuplicateRule, RSEBlacklisted,
-                                    InvalidRSEExpression, InsufficientTargetRSEs, InsufficientAccountLimit, InputValidationError, RSEOverQuota,
-                                    ReplicationRuleCreationTemporaryFailed, InvalidRuleWeight, StagingAreaRuleRequiresLifetime, SubscriptionNotFound)
+import rucio.db.sqla.util
 from rucio.common.config import config_get
+from rucio.common.exception import (DatabaseException, DataIdentifierNotFound, InvalidReplicationRule, DuplicateRule,
+                                    RSEBlacklisted, RSEWriteBlocked, InvalidRSEExpression, InsufficientTargetRSEs,
+                                    InsufficientAccountLimit, InputValidationError, RSEOverQuota,
+                                    ReplicationRuleCreationTemporaryFailed, InvalidRuleWeight,
+                                    StagingAreaRuleRequiresLifetime, SubscriptionWrongParameter, SubscriptionNotFound)
 from rucio.common.schema import validate_schema
 from rucio.common.utils import chunks
 from rucio.core import monitor, heartbeat
 from rucio.core.did import list_new_dids, set_new_dids, get_metadata
-from rucio.core.rse import list_rses
+from rucio.core.rse import list_rses, rse_exists, get_rse_id, list_rse_attributes
 from rucio.core.rse_expression_parser import parse_expression
 from rucio.core.rse_selector import RSESelector
-from rucio.core.rule import add_rule, list_rules
+from rucio.core.rule import add_rule, list_rules, get_rule
 from rucio.core.subscription import list_subscriptions, update_subscription
-
+from rucio.db.sqla.constants import DIDType, SubscriptionState
 
 logging.basicConfig(stream=stdout,
                     level=getattr(logging,
@@ -122,10 +123,20 @@ def is_matching_subscription(subscription, did, metadata):
         elif key == 'scope':
             match_scope = False
             for scope in values:
-                if re.match(scope, did['scope'].external):
+                if re.match(scope, did['scope'].internal):
                     match_scope = True
                     break
             if not match_scope:
+                return False
+        elif key == 'account':
+            match_account = False
+            if not isinstance(values, list):
+                values = [values]
+            for account in values:
+                if account == metadata['account'].internal:
+                    match_account = True
+                    break
+            if not match_account:
                 return False
         else:
             if not isinstance(values, list):
@@ -146,6 +157,42 @@ def is_matching_subscription(subscription, did, metadata):
     return True
 
 
+def select_algorithm(algorithm, rule_ids, params):
+    """
+    Method used in case of chained subscriptions
+
+    :param algorithm: Algorithm used for the chained rule. Now only associated_site
+                      associated_site : Choose an associated endpoint according to the RSE attribute assoiciated_site
+    :param rule_ids: List of parent rules
+    :param params: List of rules parameters to be used by the algorithm
+    """
+    selected_rses = {}
+    if algorithm == 'associated_site':
+        for rule_id in rule_ids:
+            rule = get_rule(rule_id)
+            logging.debug('In select_algorithm, %s', str(rule))
+            rse = rule['rse_expression']
+            vo = rule['account'].vo
+            if rse_exists(rse, vo=vo):
+                rse_id = get_rse_id(rse, vo=vo)
+                rse_attributes = list_rse_attributes(rse_id)
+                associated_sites = rse_attributes.get('associated_sites', None)
+                associated_site_idx = params.get('associated_site_idx', None)
+                if not associated_site_idx:
+                    raise SubscriptionWrongParameter('Missing parameter associated_site_idx')
+                if associated_sites:
+                    associated_sites = associated_sites.split(',')
+                    if associated_site_idx > len(associated_sites) + 1:
+                        raise SubscriptionWrongParameter('Parameter associated_site_idx is out of range')
+                    associated_site = associated_sites[associated_site_idx - 1]
+                    selected_rses[associated_site] = {'source_replica_expression': rse, 'weight': None}
+            else:
+                raise SubscriptionWrongParameter('Algorithm associated_site only works with split_rule')
+            if rule['copies'] != 1:
+                raise SubscriptionWrongParameter('Algorithm associated_site only works with split_rule')
+    return selected_rses
+
+
 def transmogrifier(bulk=5, once=False, sleep_time=60):
     """
     Creates a Transmogrifier Worker that gets a list of new DIDs for a given hash,
@@ -158,7 +205,7 @@ def transmogrifier(bulk=5, once=False, sleep_time=60):
     :param sleep_time: Time between two cycles.
     """
 
-    executable = ' '.join(argv)
+    executable = 'transmogrifier'
     hostname = socket.getfqdn()
     pid = os.getpid()
     hb_thread = threading.current_thread()
@@ -223,38 +270,41 @@ def transmogrifier(bulk=5, once=False, sleep_time=60):
                             if is_matching_subscription(subscription, did, metadata) is True:
                                 filter_string = loads(subscription['filter'])
                                 split_rule = filter_string.get('split_rule', False)
-                                if split_rule == 'true':
-                                    split_rule = True
-                                elif split_rule == 'false':
-                                    split_rule = False
                                 stime = time.time()
                                 results[did_tag].append(subscription['id'])
                                 logging.info(prepend_str + '%s:%s matches subscription %s' % (did['scope'], did['name'], subscription['name']))
-                                for rule_string in loads(subscription['replication_rules']):
+                                rules = loads(subscription['replication_rules'])
+                                created_rules = {}
+                                cnt = 0
+                                for rule_dict in rules:
+                                    cnt += 1
+                                    created_rules[cnt] = []
                                     # Get all the rule and subscription parameters
-                                    grouping = rule_string.get('grouping', 'DATASET')
-                                    lifetime = rule_string.get('lifetime', None)
-                                    ignore_availability = rule_string.get('ignore_availability', None)
-                                    weight = rule_string.get('weight', None)
-                                    source_replica_expression = rule_string.get('source_replica_expression', None)
-                                    locked = rule_string.get('locked', None)
+                                    grouping = rule_dict.get('grouping', 'DATASET')
+                                    lifetime = rule_dict.get('lifetime', None)
+                                    ignore_availability = rule_dict.get('ignore_availability', None)
+                                    weight = rule_dict.get('weight', None)
+                                    source_replica_expression = rule_dict.get('source_replica_expression', None)
+                                    locked = rule_dict.get('locked', None)
                                     if locked == 'True':
                                         locked = True
                                     else:
                                         locked = False
-                                    purge_replicas = rule_string.get('purge_replicas', False)
+                                    purge_replicas = rule_dict.get('purge_replicas', False)
                                     if purge_replicas == 'True':
                                         purge_replicas = True
                                     else:
                                         purge_replicas = False
-                                    rse_expression = str(rule_string['rse_expression'])
+                                    rse_expression = str(rule_dict['rse_expression'])
                                     comment = str(subscription['comments'])
+                                    if 'comments' in rule_dict:
+                                        comment = str(rule_dict['comments'])
                                     subscription_id = str(subscription['id'])
                                     account = subscription['account']
-                                    copies = int(rule_string['copies'])
-                                    activity = rule_string.get('activity', 'User Subscriptions')
+                                    copies = int(rule_dict['copies'])
+                                    activity = rule_dict.get('activity', 'User Subscriptions')
                                     try:
-                                        validate_schema(name='activity', obj=activity)
+                                        validate_schema(name='activity', obj=activity, vo=account.vo)
                                     except InputValidationError as error:
                                         logging.error(prepend_str + 'Error validating the activity %s' % (str(error)))
                                         activity = 'User Subscriptions'
@@ -267,40 +317,51 @@ def transmogrifier(bulk=5, once=False, sleep_time=60):
                                     attemptnr = 0
                                     skip_rule_creation = False
 
-                                    if split_rule:
-                                        rses = parse_expression(rse_expression)
-                                        list_of_rses = [rse['id'] for rse in rses]
-                                        # Check that some rule doesn't already exist for this DID and subscription
-                                        preferred_rse_ids = []
-                                        for rule in list_rules(filters={'subscription_id': subscription_id, 'scope': did['scope'], 'name': did['name']}):
-                                            already_existing_rses = [(rse['rse'], rse['id']) for rse in parse_expression(rule['rse_expression'])]
-                                            for rse, rse_id in already_existing_rses:
-                                                if (rse_id in list_of_rses) and (rse_id not in preferred_rse_ids):
-                                                    preferred_rse_ids.append(rse_id)
-                                        if len(preferred_rse_ids) >= copies:
-                                            skip_rule_creation = True
-
-                                        rse_id_dict = {}
-                                        for rse in rses:
-                                            rse_id_dict[rse['id']] = rse['rse']
-                                        try:
-                                            rseselector = RSESelector(account=account, rses=rses, weight=weight, copies=copies - len(preferred_rse_ids))
-                                            selected_rses = [rse_id_dict[rse_id] for rse_id, _, _ in rseselector.select_rse(0, preferred_rse_ids=preferred_rse_ids, copies=copies, blacklist=blacklisted_rse_id)]
-                                        except (InsufficientTargetRSEs, InsufficientAccountLimit, InvalidRuleWeight, RSEOverQuota) as error:
-                                            logging.warning(prepend_str + 'Problem getting RSEs for subscription "%s" for account %s : %s. Try including blacklisted sites' %
-                                                            (subscription['name'], account, str(error)))
-                                            # Now including the blacklisted sites
+                                    selected_rses = []
+                                    chained_idx = rule_dict.get('chained_idx', None)
+                                    if chained_idx:
+                                        params = {}
+                                        if rule_dict.get('associated_site_idx', None):
+                                            params['associated_site_idx'] = rule_dict.get('associated_site_idx', None)
+                                        logging.debug('%s Chained subscription identified. Will use %s', prepend_str, str(created_rules[chained_idx]))
+                                        algorithm = rule_dict.get('algorithm', None)
+                                        selected_rses = select_algorithm(algorithm, created_rules[chained_idx], params)
+                                    else:
+                                        # In the case of chained subscription, don't use rseselector but use the rses returned by the algorithm
+                                        if split_rule:
+                                            vo = account.vo
+                                            rses = parse_expression(rse_expression, filter={'vo': vo})
+                                            list_of_rses = [rse['id'] for rse in rses]
+                                            # Check that some rule doesn't already exist for this DID and subscription
+                                            preferred_rse_ids = []
+                                            for rule in list_rules(filters={'subscription_id': subscription_id, 'scope': did['scope'], 'name': did['name']}):
+                                                already_existing_rses = [(rse['rse'], rse['id']) for rse in parse_expression(rule['rse_expression'], filter={'vo': vo})]
+                                                for rse, rse_id in already_existing_rses:
+                                                    if (rse_id in list_of_rses) and (rse_id not in preferred_rse_ids):
+                                                        preferred_rse_ids.append(rse_id)
+                                            if len(preferred_rse_ids) >= copies:
+                                                skip_rule_creation = True
+                                            rse_id_dict = {}
+                                            for rse in rses:
+                                                rse_id_dict[rse['id']] = rse['rse']
                                             try:
                                                 rseselector = RSESelector(account=account, rses=rses, weight=weight, copies=copies - len(preferred_rse_ids))
-                                                selected_rses = [rse_id_dict[rse_id] for rse_id, _, _ in rseselector.select_rse(0, preferred_rse_ids=preferred_rse_ids, copies=copies, blacklist=[])]
-                                                ignore_availability = True
+                                                selected_rses = [rse_id_dict[rse_id] for rse_id, _, _ in rseselector.select_rse(0, preferred_rse_ids=preferred_rse_ids, copies=copies, blacklist=blacklisted_rse_id)]
                                             except (InsufficientTargetRSEs, InsufficientAccountLimit, InvalidRuleWeight, RSEOverQuota) as error:
-                                                logging.error(prepend_str + 'Problem getting RSEs for subscription "%s" for account %s : %s. Skipping rule creation.' %
-                                                              (subscription['name'], account, str(error)))
-                                                monitor.record_counter(counters='transmogrifier.addnewrule.errortype.%s' % (str(error.__class__.__name__)), delta=1)
-                                                # The DID won't be reevaluated at the next cycle
-                                                did_success = did_success and True
-                                                continue
+                                                logging.warning(prepend_str + 'Problem getting RSEs for subscription "%s" for account %s : %s. Try including blacklisted sites' %
+                                                                (subscription['name'], account, str(error)))
+                                                # Now including the blacklisted sites
+                                                try:
+                                                    rseselector = RSESelector(account=account, rses=rses, weight=weight, copies=copies - len(preferred_rse_ids))
+                                                    selected_rses = [rse_id_dict[rse_id] for rse_id, _, _ in rseselector.select_rse(0, preferred_rse_ids=preferred_rse_ids, copies=copies, blacklist=[])]
+                                                    ignore_availability = True
+                                                except (InsufficientTargetRSEs, InsufficientAccountLimit, InvalidRuleWeight, RSEOverQuota) as error:
+                                                    logging.error(prepend_str + 'Problem getting RSEs for subscription "%s" for account %s : %s. Skipping rule creation.' %
+                                                                  (subscription['name'], account, str(error)))
+                                                    monitor.record_counter(counters='transmogrifier.addnewrule.errortype.%s' % (str(error.__class__.__name__)), delta=1)
+                                                    # The DID won't be reevaluated at the next cycle
+                                                    did_success = did_success and True
+                                                    continue
 
                                     for attempt in range(0, nattempt):
                                         attemptnr = attempt
@@ -310,21 +371,25 @@ def transmogrifier(bulk=5, once=False, sleep_time=60):
                                             if split_rule:
                                                 if not skip_rule_creation:
                                                     for rse in selected_rses:
+                                                        if isinstance(selected_rses, dict):
+                                                            source_replica_expression = selected_rses[rse].get('source_replica_expression', None)
+                                                            weight = selected_rses[rse].get('weight', None)
                                                         logging.info(prepend_str + 'Will insert one rule for %s:%s on %s' % (did['scope'], did['name'], rse))
-                                                        add_rule(dids=[{'scope': did['scope'], 'name': did['name']}], account=account, copies=1,
-                                                                 rse_expression=rse, grouping=grouping, weight=weight, lifetime=lifetime, locked=locked,
-                                                                 subscription_id=subscription_id, source_replica_expression=source_replica_expression, activity=activity,
-                                                                 purge_replicas=purge_replicas, ignore_availability=ignore_availability, comment=comment)
-
+                                                        rule_ids = add_rule(dids=[{'scope': did['scope'], 'name': did['name']}], account=account, copies=1,
+                                                                            rse_expression=rse, grouping=grouping, weight=weight, lifetime=lifetime, locked=locked,
+                                                                            subscription_id=subscription_id, source_replica_expression=source_replica_expression, activity=activity,
+                                                                            purge_replicas=purge_replicas, ignore_availability=ignore_availability, comment=comment)
+                                                        created_rules[cnt].append(rule_ids[0])
                                                         nb_rule += 1
                                                         if nb_rule == copies:
                                                             success = True
                                                             break
                                             else:
-                                                add_rule(dids=[{'scope': did['scope'], 'name': did['name']}], account=account, copies=copies,
-                                                         rse_expression=rse_expression, grouping=grouping, weight=weight, lifetime=lifetime, locked=locked,
-                                                         subscription_id=subscription['id'], source_replica_expression=source_replica_expression, activity=activity,
-                                                         purge_replicas=purge_replicas, ignore_availability=ignore_availability, comment=comment)
+                                                rule_ids = add_rule(dids=[{'scope': did['scope'], 'name': did['name']}], account=account, copies=copies,
+                                                                    rse_expression=rse_expression, grouping=grouping, weight=weight, lifetime=lifetime, locked=locked,
+                                                                    subscription_id=subscription['id'], source_replica_expression=source_replica_expression, activity=activity,
+                                                                    purge_replicas=purge_replicas, ignore_availability=ignore_availability, comment=comment)
+                                                created_rules[cnt].append(rule_ids[0])
                                                 nb_rule += 1
                                             monitor.record_counter(counters='transmogrifier.addnewrule.done', delta=nb_rule)
                                             monitor.record_counter(counters='transmogrifier.addnewrule.activity.%s' % str_activity, delta=nb_rule)
@@ -336,11 +401,13 @@ def transmogrifier(bulk=5, once=False, sleep_time=60):
                                             logging.error(prepend_str + '%s' % (str(error)))
                                             monitor.record_counter(counters='transmogrifier.addnewrule.errortype.%s' % (str(error.__class__.__name__)), delta=1)
                                             break
-                                        except (ReplicationRuleCreationTemporaryFailed, InsufficientTargetRSEs, InsufficientAccountLimit, DatabaseException, RSEBlacklisted) as error:
+                                        except (ReplicationRuleCreationTemporaryFailed, InsufficientTargetRSEs,
+                                                InsufficientAccountLimit, DatabaseException, RSEBlacklisted,
+                                                RSEWriteBlocked) as error:
                                             # Errors to be retried
                                             logging.error(prepend_str + '%s Will perform an other attempt %i/%i' % (str(error), attempt + 1, nattempt))
                                             monitor.record_counter(counters='transmogrifier.addnewrule.errortype.%s' % (str(error.__class__.__name__)), delta=1)
-                                        except Exception as error:
+                                        except Exception:
                                             # Unexpected errors
                                             monitor.record_counter(counters='transmogrifier.addnewrule.errortype.unknown', delta=1)
                                             exc_type, exc_value, exc_traceback = exc_info()
@@ -362,7 +429,7 @@ def transmogrifier(bulk=5, once=False, sleep_time=60):
                     elif did['did_type'] == str(DIDType.CONTAINER):
                         monitor.record_counter(counters='transmogrifier.did.container.processed', delta=1)
                     monitor.record_counter(counters='transmogrifier.did.processed', delta=1)
-                    identifiers.append({'scope': did['scope'], 'name': did['name'], 'did_type': DIDType.from_sym(did['did_type'])})
+                    identifiers.append({'scope': did['scope'], 'name': did['name'], 'did_type': did['did_type']})
 
             time1 = time.time()
 
@@ -397,6 +464,8 @@ def run(threads=1, bulk=100, once=False, sleep_time=60):
     """
     Starts up the transmogrifier threads.
     """
+    if rucio.db.sqla.util.is_old_db():
+        raise DatabaseException('Database was not updated, daemon won\'t start')
 
     if once:
         logging.info('Will run only one iteration in a single threaded mode')

@@ -1,5 +1,6 @@
-#!/usr/bin/env python
-# Copyright 2018 CERN for the benefit of the ATLAS collaboration.
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Copyright 2014-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,22 +17,25 @@
 # Authors:
 # - Martin Barisits <martin.barisits@cern.ch>, 2014-2019
 # - Vincent Garonne <vincent.garonne@cern.ch>, 2017
+# - Thomas Beermann <thomas.beermann@cern.ch>, 2018-2020
 # - Mario Lassnig <mario.lassnig@cern.ch>, 2018
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
-#
-# PY3K COMPATIBLE
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
+# - Eli Chadwick <eli.chadwick@stfc.ac.uk>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
 from __future__ import print_function
+
 from json import loads
 from logging import getLogger, StreamHandler, DEBUG
 from traceback import format_exc
+
 from web import application, loadhook, ctx, data, Created, InternalError, OK
 
 from rucio.api.account_limit import set_local_account_limit, delete_local_account_limit, set_global_account_limit, delete_global_account_limit
 from rucio.common.exception import RSENotFound, AccessDenied, AccountNotFound
-from rucio.common.utils import generate_http_error
 from rucio.web.rest.common import rucio_loadhook, RucioController
-
+from rucio.web.rest.utils import generate_http_error
 
 LOGGER = getLogger("rucio.account_limit")
 SH = StreamHandler()
@@ -79,7 +83,7 @@ class LocalAccountLimit(RucioController):
             raise generate_http_error(400, 'TypeError', 'body must be a json dictionary')
 
         try:
-            set_local_account_limit(account=account, rse=rse, bytes=bytes, issuer=ctx.env.get('issuer'))
+            set_local_account_limit(account=account, rse=rse, bytes=bytes, issuer=ctx.env.get('issuer'), vo=ctx.env.get('vo'))
         except AccessDenied as exception:
             raise generate_http_error(401, 'AccessDenied', exception.args[0])
         except RSENotFound as exception:
@@ -108,7 +112,7 @@ class LocalAccountLimit(RucioController):
         :param rse:                  RSE name.
         """
         try:
-            delete_local_account_limit(account=account, rse=rse, issuer=ctx.env.get('issuer'))
+            delete_local_account_limit(account=account, rse=rse, issuer=ctx.env.get('issuer'), vo=ctx.env.get('vo'))
         except AccessDenied as exception:
             raise generate_http_error(401, 'AccessDenied', exception.args[0])
         except AccountNotFound as exception:
@@ -155,7 +159,7 @@ class GlobalAccountLimit(RucioController):
             raise generate_http_error(400, 'TypeError', 'body must be a json dictionary')
 
         try:
-            set_global_account_limit(account=account, rse_expression=rse_expression, bytes=bytes, issuer=ctx.env.get('issuer'))
+            set_global_account_limit(account=account, rse_expression=rse_expression, bytes=bytes, issuer=ctx.env.get('issuer'), vo=ctx.env.get('vo'))
         except AccessDenied as exception:
             raise generate_http_error(401, 'AccessDenied', exception.args[0])
         except RSENotFound as exception:
@@ -184,7 +188,7 @@ class GlobalAccountLimit(RucioController):
         :param rse_expression:       RSE expression.
         """
         try:
-            delete_global_account_limit(account=account, rse_expression=rse_expression, issuer=ctx.env.get('issuer'))
+            delete_global_account_limit(account=account, rse_expression=rse_expression, issuer=ctx.env.get('issuer'), vo=ctx.env.get('vo'))
         except AccessDenied as exception:
             raise generate_http_error(401, 'AccessDenied', exception.args[0])
         except AccountNotFound as exception:
@@ -203,4 +207,5 @@ class GlobalAccountLimit(RucioController):
 
 APP = application(URLS, globals())
 APP.add_processor(loadhook(rucio_loadhook))
-application = APP.wsgifunc()
+if __name__ != "rucio.web.rest.account_limit":
+    application = APP.wsgifunc()

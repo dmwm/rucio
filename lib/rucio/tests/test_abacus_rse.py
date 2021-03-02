@@ -1,4 +1,5 @@
-# Copyright 2018 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2018-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,40 +15,53 @@
 #
 # Authors:
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
-# - Andrew Lister, <andrew.lister@stfc.ac.uk>, 2019
-#
-# PY3K COMPATIBLE
-
-from nose.tools import assert_equal
+# - Martin Barisits <martin.barisits@cern.ch>, 2019
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
+# - Patrick Austin <patrick.austin@stfc.ac.uk>, 2020
+# - Eli Chadwick <eli.chadwick@stfc.ac.uk>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
 import os
+import unittest
 
-from rucio.db.sqla import models
-from rucio.db.sqla.session import get_session
 from rucio.client.uploadclient import UploadClient
+from rucio.common.config import config_get, config_get_bool
 from rucio.common.utils import generate_uuid
 from rucio.core.rse import get_rse_id, get_rse_usage
-from rucio.daemons.undertaker import undertaker
 from rucio.daemons.abacus import rse
 from rucio.daemons.judge import cleaner
 from rucio.daemons.reaper import reaper
+from rucio.daemons.undertaker import undertaker
+from rucio.db.sqla import models
+from rucio.db.sqla.session import get_session
 from rucio.tests.common import file_generator
 
 
-class TestAbacusRSE():
-    def setUp(self):
-        self.account = 'root'
-        self.scope = 'mock'
-        self.upload_client = UploadClient()
-        self.file_sizes = 2
-        self.rse = 'MOCK4'
-        self.rse_id = get_rse_id(self.rse)
-        self.session = get_session()
+class TestAbacusRSE(unittest.TestCase):
+    account = 'root'
+    scope = 'mock'
+    rse = 'MOCK4'
+    file_sizes = 2
+    vo = {}
 
-    def tearDown(self):
+    @classmethod
+    def setUpClass(cls):
+        cls.upload_client = UploadClient()
+        cls.session = get_session()
+
+        if config_get_bool('common', 'multi_vo', raise_exception=False, default=False):
+            cls.vo = {'vo': config_get('client', 'vo', raise_exception=False, default='tst')}
+
+        cls.rse_id = get_rse_id(cls.rse, session=cls.session, **cls.vo)
+
+    @classmethod
+    def tearDownClass(cls):
         undertaker.run(once=True)
         cleaner.run(once=True)
-        reaper.run(once=True, rses=[self.rse], greedy=True)
+        if cls.vo:
+            reaper.run(once=True, include_rses='vo=%s&(%s)' % (cls.vo['vo'], cls.rse), greedy=True)
+        else:
+            reaper.run(once=True, include_rses=cls.rse, greedy=True)
 
     def test_abacus_rse(self):
         """ ABACUS (RSE): Test update of RSE usage. """
@@ -62,19 +76,22 @@ class TestAbacusRSE():
         [os.remove(file['path']) for file in self.files]
         rse.run(once=True)
         rse_usage = get_rse_usage(rse_id=self.rse_id)[0]
-        assert_equal(rse_usage['used'], len(self.files) * self.file_sizes)
+        assert rse_usage['used'] == len(self.files) * self.file_sizes
         rse_usage_from_rucio = get_rse_usage(rse_id=self.rse_id, source='rucio')[0]
-        assert_equal(rse_usage_from_rucio['used'], len(self.files) * self.file_sizes)
+        assert rse_usage_from_rucio['used'] == len(self.files) * self.file_sizes
         rse_usage_from_unavailable = get_rse_usage(rse_id=self.rse_id, source='unavailable')
-        assert_equal(len(rse_usage_from_unavailable), 0)
+        assert len(rse_usage_from_unavailable) == 0
 
         # Delete files -> rse usage should decrease
         cleaner.run(once=True)
-        reaper.run(once=True, rses=[self.rse], greedy=True)
+        if self.vo:
+            reaper.run(once=True, include_rses='vo=%s&(%s)' % (self.vo['vo'], self.rse), greedy=True)
+        else:
+            reaper.run(once=True, include_rses=self.rse, greedy=True)
         rse.run(once=True)
         rse_usage = get_rse_usage(rse_id=self.rse_id)[0]
-        assert_equal(rse_usage['used'], 0)
+        assert rse_usage['used'] == 0
         rse_usage_from_rucio = get_rse_usage(rse_id=self.rse_id, source='rucio')[0]
-        assert_equal(rse_usage_from_rucio['used'], 0)
+        assert rse_usage_from_rucio['used'] == 0
         rse_usage_from_unavailable = get_rse_usage(rse_id=self.rse_id, source='unavailable')
-        assert_equal(len(rse_usage_from_unavailable), 0)
+        assert len(rse_usage_from_unavailable) == 0

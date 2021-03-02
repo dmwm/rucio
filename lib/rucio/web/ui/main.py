@@ -1,5 +1,6 @@
-#!/usr/bin/env python
-# Copyright 2014-2018 CERN for the benefit of the ATLAS collaboration.
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Copyright 2014-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,30 +16,32 @@
 #
 # Authors:
 # - Thomas Beermann <thomas.beermann@cern.ch>, 2014-2017
-# - Vincent Garonne <vgaronne@gmail.com>, 2014
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2014
 # - Mario Lassnig <mario.lassnig@cern.ch>, 2014-2018
 # - Martin Barisits <martin.barisits@cern.ch>, 2014-2015
 # - Ralph Vigne <ralph.vigne@cern.ch>, 2015
 # - Cedric Serfon <cedric.serfon@cern.ch>, 2015-2019
 # - Stefan Prenner <stefan.prenner@cern.ch>, 2018
-# - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2019
+# - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
 # - Ruturaj Gujar <ruturaj.gujar23@gmail.com>, 2019
-#
-# PY3K COMPATIBLE
+# - Jaroslav Guenther <jaroslav.guenther@cern.ch>, 2020
+# - Patrick Austin <patrick.austin@stfc.ac.uk>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
+from gzip import GzipFile
 from io import BytesIO
 from json import dumps
 from os.path import dirname, join
 from tarfile import open, TarError
 
-from gzip import GzipFile
 from requests import get, ConnectionError
 from web import application, header, input as param_input, seeother, template
+from web import cookies
 
-from rucio.common.config import config_get
-from rucio.common.utils import generate_http_error
-from rucio.web.ui.common.utils import get_token, log_in, authenticate, saml_authentication
-
+from rucio.api.authentication import get_auth_token_x509
+from rucio.common.config import config_get, config_get_bool
+from rucio.web.rest.utils import generate_http_error
+from rucio.web.ui.common.utils import get_token, authenticate, userpass_auth, x509token_auth, saml_auth, oidc_auth, finalize_auth, AUTH_ISSUERS, SAML_SUPPORT
 
 COMMON_URLS = (
     '/account_rse_usage', 'AccountRSEUsage',
@@ -74,9 +77,14 @@ COMMON_URLS = (
     '/logfiles/load', 'LoadLogfile',
     '/logfiles/extract', 'ExtractLogfile',
     '/login', 'Login',
-    '/saml', 'SAML'
+    '/saml', 'SAML',
+    '/oidc', 'OIDC',
+    '/oidc_final', 'FinalizeOIDC',
+    '/x509', 'X509'
+
 )
 
+MULTI_VO = config_get_bool('common', 'multi_vo', raise_exception=False, default=False)
 POLICY = config_get('policy', 'permission')
 
 ATLAS_URLS = ()
@@ -165,15 +173,60 @@ class AtlasIndex(object):
 
 
 class Auth(object):
-    """ Local Auth Proxy """
+    """ Local Auth Proxy
+    serves for changes of account on WebUI when new authentication
+    token for newly selected account has to be found.
+    For x509 request a new token directly as all necessary input
+    is present in the browser. For all other authenticatino mechanisms,
+    redirect to select_login_method page.
+    """
     def GET(self):  # pylint:disable=no-self-use,invalid-name
         """ GET """
-        token = get_token()
-        if token:
-            header('X-Rucio-Auth-Token', token)
-            return str()
+        # get info about x509 or not and decide
+        auth_type = cookies().get('x-rucio-auth-type')
+        if str(auth_type).lower() == 'x509':
+            token = get_token(get_auth_token_x509)
+            if token:
+                header('X-Rucio-Auth-Token', token)
+                return str()
+            else:
+                raise generate_http_error(401, 'CannotAuthenticate', 'Cannot get token')
         else:
-            raise generate_http_error(401, 'CannotAuthenticate', 'Cannot get token')
+            render = template.render(join(dirname(__file__), 'templates/'))
+            return render.select_login_method(AUTH_ISSUERS, SAML_SUPPORT, None)
+
+
+class X509(object):
+    """ Local X509 Authentication for Rucio UI """
+    def GET(self):  # pylint:disable=no-self-use,invalid-name
+        """ GET """
+        data = param_input()
+        return x509token_auth(data)
+
+
+class OIDC(object):
+    """ Local Open ID Connect Authentication for Rucio UI """
+    def GET(self):  # pylint:disable=no-self-use,invalid-name
+        """ GET """
+        data = param_input()
+        try:
+            if not MULTI_VO:
+                ui_vo = 'def'
+            elif hasattr(data, 'vo') and data.vo:
+                ui_vo = data.vo
+            else:
+                ui_vo = None
+            return oidc_auth(data.account, data.issuer, ui_vo)
+        except:
+            raise generate_http_error(401, 'CannotAuthenticate', 'Cannot get token OIDC auth url from the server.')
+
+
+class FinalizeOIDC(object):
+    """ Local finalization of Open ID Connect Authentication for Rucio UI """
+    def GET(self):  # pylint:disable=no-self-use,invalid-name
+        """ GET """
+        session_token = cookies().get('x-rucio-auth-token')
+        return finalize_auth(session_token, 'OIDC')
 
 
 class Accounting(object):
@@ -300,16 +353,25 @@ class ListRulesRedirect(object):
 
 
 class Login(object):
-    """ Login page """
+    """ Rucio userpass login page """
     def GET(self):
         """ GET """
         render = template.render(join(dirname(__file__), 'templates/'))
-        return render.login()
+        data = param_input()
+        if hasattr(data, 'account') and data.account:
+            account = data.account
+        else:
+            account = None
+        if hasattr(data, 'vo') and data.vo:
+            vo = data.vo
+        else:
+            vo = None
+        return render.login(account, vo, None)
 
     def POST(self):
         """ POST """
         data = param_input()
-        return log_in(data, None)
+        return userpass_auth(data, None)
 
 
 class Rule(object):
@@ -419,13 +481,13 @@ class SAML(object):
     """ Login with SAML """
     def GET(self):
         """ GET """
-        render = template.render(join(dirname(__file__), 'templates/'))
-        return saml_authentication("GET", render.atlas_index())
+        data = param_input()
+        return saml_auth("GET", data=data)
 
     def POST(self):
         """ POST """
-        render = template.render(join(dirname(__file__), 'templates/'))
-        return saml_authentication("POST", render.atlas_index())
+        data = param_input()
+        return saml_auth("POST", data=data)
 
 
 class Search(object):

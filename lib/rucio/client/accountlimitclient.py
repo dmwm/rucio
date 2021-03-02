@@ -13,13 +13,19 @@
 # limitations under the License.
 #
 # Authors:
-# - Martin Barisits <martin.barisits@cern.ch>, 2014-2018
+# - Martin Barisits <martin.barisits@cern.ch>, 2014-2020
 # - Cedric Serfon <cedric.serfon@cern.ch>, 2014
 # - Vincent Garonne <vgaronne@gmail.com>, 2014-2018
 # - Ralph Vigne <ralph.vigne@cern.ch>, 2015
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2019
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
 #
 # PY3K COMPATIBLE
+
+try:
+    from urllib import quote_plus
+except ImportError:
+    from urllib.parse import quote_plus
 
 from json import dumps
 from requests.status_codes import codes
@@ -36,9 +42,9 @@ class AccountLimitClient(BaseClient):
     ACCOUNTLIMIT_BASEURL = 'accountlimits'
 
     def __init__(self, rucio_host=None, auth_host=None, account=None, ca_cert=None,
-                 auth_type=None, creds=None, timeout=600, user_agent='rucio-clients'):
+                 auth_type=None, creds=None, timeout=600, user_agent='rucio-clients', vo=None):
         super(AccountLimitClient, self).__init__(rucio_host, auth_host, account, ca_cert,
-                                                 auth_type, creds, timeout, user_agent)
+                                                 auth_type, creds, timeout, user_agent, vo=vo)
 
     def set_account_limit(self, account, rse, bytes, locality):
         """
@@ -132,7 +138,7 @@ class AccountLimitClient(BaseClient):
         """
 
         data = dumps({'bytes': bytes})
-        path = '/'.join([self.ACCOUNTLIMIT_BASEURL, 'global', account, rse_expression])
+        path = '/'.join([self.ACCOUNTLIMIT_BASEURL, 'global', account, quote_plus(rse_expression)])
         url = build_url(choice(self.list_hosts), path=path)
 
         r = self._send_request(url, type='POST', data=data)
@@ -154,7 +160,7 @@ class AccountLimitClient(BaseClient):
         :raises AccountNotFound: if account doesn't exist.
         """
 
-        path = '/'.join([self.ACCOUNTLIMIT_BASEURL, 'global', account, rse_expression])
+        path = '/'.join([self.ACCOUNTLIMIT_BASEURL, 'global', account, quote_plus(rse_expression)])
         url = build_url(choice(self.list_hosts), path=path)
 
         r = self._send_request(url, type='DEL')

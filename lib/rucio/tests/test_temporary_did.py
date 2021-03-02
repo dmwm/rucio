@@ -1,4 +1,4 @@
-# Copyright 2016-2018 CERN for the benefit of the ATLAS collaboration.
+# Copyright 2016-2020 CERN for the benefit of the ATLAS collaboration.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,29 +13,33 @@
 # limitations under the License.
 #
 # Authors:
-# - Vincent Garonne <vgaronne@gmail.com>, 2016-2018
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2016-2018
 # - Joaquin Bogado <jbogado@linti.unlp.edu.ar>, 2018
 # - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
-
-from nose.tools import assert_equal
-
-from rucio.common.types import InternalAccount, InternalScope
-from rucio.common.utils import generate_uuid
-from rucio.core.temporary_did import (add_temporary_dids, compose, delete_temporary_dids,
-                                      list_expired_temporary_dids)
-from rucio.core.rse import get_rse_id
+# - Patrick Austin <patrick.austin@stfc.ac.uk>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
 from rucio.client.didclient import DIDClient
+from rucio.common.config import config_get, config_get_bool
+from rucio.common.types import InternalAccount, InternalScope
+from rucio.common.utils import generate_uuid
+from rucio.core.rse import get_rse_id
+from rucio.core.temporary_did import (add_temporary_dids, compose, delete_temporary_dids,
+                                      list_expired_temporary_dids)
 
 
 def test_core_temporary_dids():
     """ TMP DATA IDENTIFIERS (CORE): """
 
-    scope = InternalScope('mock')
-    root = InternalAccount('root')
+    if config_get_bool('common', 'multi_vo', raise_exception=False, default=False):
+        vo = {'vo': config_get('client', 'vo', raise_exception=False, default='tst')}
+    else:
+        vo = {}
+    scope = InternalScope('mock', **vo)
+    root = InternalAccount('root', **vo)
     temporary_dids = []
     rse = 'MOCK'
-    rse_id = get_rse_id(rse=rse)
+    rse_id = get_rse_id(rse=rse, **vo)
     for _ in range(10):
         temporary_dids.append({'scope': scope,
                                'name': 'object_%s' % generate_uuid(),
@@ -54,7 +58,7 @@ def test_core_temporary_dids():
 
     rowcount = delete_temporary_dids(dids=dids)
 
-    assert_equal(rowcount, 10)
+    assert rowcount == 10
 
 
 def test_client_temporary_dids():

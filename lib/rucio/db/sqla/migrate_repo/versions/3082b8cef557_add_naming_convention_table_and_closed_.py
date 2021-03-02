@@ -1,4 +1,5 @@
-# Copyright 2013-2019 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2015-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +15,9 @@
 #
 # Authors:
 # - Vincent Garonne <vincent.garonne@cern.ch>, 2015-2017
-# - Mario Lassnig <mario.lassnig@cern.ch>, 2019
+# - Martin Barisits <martin.barisits@cern.ch>, 2016
+# - Mario Lassnig <mario.lassnig@cern.ch>, 2019-2020
+# - James Perry <j.perry@epcc.ed.ac.uk>, 2020
 
 ''' add convention table and closed_at to dids '''
 
@@ -26,7 +29,7 @@ from alembic import context
 from alembic.op import (create_table, create_primary_key, create_foreign_key, add_column,
                         create_check_constraint, drop_column, drop_table)
 
-from rucio.common.schema import SCOPE_LENGTH
+from rucio.common.schema import get_schema_value
 from rucio.db.sqla.constants import KeyType
 
 
@@ -45,9 +48,9 @@ def upgrade():
         add_column('dids', sa.Column('closed_at', sa.DateTime), schema=schema)
         add_column('contents_history', sa.Column('deleted_at', sa.DateTime), schema=schema)
         create_table('naming_conventions',
-                     sa.Column('scope', sa.String(SCOPE_LENGTH)),
+                     sa.Column('scope', sa.String(get_schema_value('SCOPE_LENGTH'))),
                      sa.Column('regexp', sa.String(255)),
-                     sa.Column('convention_type', KeyType.db_type()),
+                     sa.Column('convention_type', sa.Enum(KeyType, name='CVT_TYPE_CHK', values_callable=lambda obj: [e.value for e in obj])),
                      sa.Column('updated_at', sa.DateTime, default=datetime.datetime.utcnow),
                      sa.Column('created_at', sa.DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow))
         create_primary_key('NAMING_CONVENTIONS_PK', 'naming_conventions', ['scope'])

@@ -17,6 +17,8 @@
 # - Martin Barisits <martin.barisits@cern.ch>, 2013-2018
 # - Ralph Vigne <ralph.vigne@cern.ch>, 2015
 # - Vincent Garonne <vgaronne@gmail.com>, 2015-2018
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
+# - Eli Chadwick <eli.chadwick@stfc.ac.uk>, 2020
 #
 # PY3K COMPATIBLE
 
@@ -34,8 +36,8 @@ class SubscriptionClient(BaseClient):
 
     SUB_BASEURL = 'subscriptions'
 
-    def __init__(self, rucio_host=None, auth_host=None, account=None, ca_cert=None, auth_type=None, creds=None, timeout=600, user_agent='rucio-clients'):
-        super(SubscriptionClient, self).__init__(rucio_host, auth_host, account, ca_cert, auth_type, creds, timeout, user_agent)
+    def __init__(self, rucio_host=None, auth_host=None, account=None, ca_cert=None, auth_type=None, creds=None, timeout=600, user_agent='rucio-clients', vo=None):
+        super(SubscriptionClient, self).__init__(rucio_host, auth_host, account, ca_cert, auth_type, creds, timeout, user_agent, vo=vo)
 
     def add_subscription(self, name, account, filter, replication_rules, comments, lifetime, retroactive, dry_run, priority=3):
         """
@@ -96,6 +98,8 @@ class SubscriptionClient(BaseClient):
             path += '/%s' % (account)
             if name:
                 path += '/%s' % (name)
+        elif name:
+            path += '/Name/%s' % (name)
         else:
             path += '/'
         url = build_url(choice(self.list_hosts), path=path)

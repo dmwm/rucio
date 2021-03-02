@@ -1,4 +1,5 @@
-# Copyright 2014-2018 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2014-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,14 +14,15 @@
 # limitations under the License.
 #
 # Authors:
-# - Mario Lassnig <mario.lassnig@cern.ch>, 2014-2018
-# - Thomas Beermann <thomas.beermann@cern.ch>, 2014-2019
-# - Wen Guan <wguan.icedew@gmail.com>, 2014-2015
-# - Vincent Garonne <vgaronne@gmail.com>, 2015-2018
-# - Martin Barisits <martin.barisits@cern.ch>, 2016-2017
+# - Mario Lassnig <mario.lassnig@cern.ch>, 2014-2020
+# - Thomas Beermann <thomas.beermann@cern.ch>, 2014-2020
+# - Wen Guan <wen.guan@cern.ch>, 2014-2015
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2015-2018
+# - Martin Barisits <martin.barisits@cern.ch>, 2016-2019
 # - Robert Illingworth <illingwo@fnal.gov>, 2018
-#
-# PY3K COMPATIBLE
+# - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2019
+# - Eric Vaandering <ewv@fnal.gov>, 2019
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
 '''
    Hermes is a daemon to deliver messages: to a messagebroker via STOMP, or emails via SMTP.
@@ -36,18 +38,19 @@ import sys
 import threading
 import time
 import traceback
-
 from email.mime.text import MIMEText
+
+import stomp
+from prometheus_client import Counter
 from six import PY2
 from sqlalchemy.orm.exc import NoResultFound
 
-import stomp
-
+import rucio.db.sqla.util
+from rucio.common import exception
 from rucio.common.config import config_get, config_get_int, config_get_bool
 from rucio.core.heartbeat import live, die, sanity_check
 from rucio.core.message import retrieve_messages, delete_messages
 from rucio.core.monitor import record_counter
-
 
 logging.getLogger('requests').setLevel(logging.CRITICAL)
 logging.getLogger('stomp').setLevel(logging.CRITICAL)
@@ -60,6 +63,8 @@ logging.basicConfig(stream=sys.stdout,
                     format='%(asctime)s\t%(process)d\t%(levelname)s\t%(message)s')
 
 GRACEFUL_STOP = threading.Event()
+
+RECONNECT_COUNTER = Counter('rucio_daemons_hermes_reconnect', 'Counts Hermes reconnects to different ActiveMQ brokers', labelnames=('host',))
 
 
 def deliver_emails(once=False, send_email=True, thread=0, bulk=1000, delay=10):
@@ -254,6 +259,8 @@ def deliver_messages(once=False, brokers_resolved=None, thread=0, bulk=1000, del
                         if not conn.is_connected():
                             host_and_ports = conn.transport._Transport__host_and_ports[0][0]
                             record_counter('daemons.hermes.reconnect.%s' % host_and_ports.split('.')[0])
+                            labels = {'host': host_and_ports.split('.')[0]}
+                            RECONNECT_COUNTER.labels(**labels).inc()
                             conn.start()
                             if not use_ssl:
                                 logging.info('[broker] %i:%i - connecting with USERPASS to %s',
@@ -281,8 +288,8 @@ def deliver_messages(once=False, brokers_resolved=None, thread=0, bulk=1000, del
                                           'payload': json.dumps(message['payload']),
                                           'event_type': message['event_type']})
                     except ValueError:
-                        logging.warn('Cannot serialize payload to JSON: %s',
-                                     str(message['payload']))
+                        logging.warning('Cannot serialize payload to JSON: %s',
+                                        str(message['payload']))
                         to_delete.append({'id': message['id'],
                                           'created_at': message['created_at'],
                                           'updated_at': message['created_at'],
@@ -290,15 +297,15 @@ def deliver_messages(once=False, brokers_resolved=None, thread=0, bulk=1000, del
                                           'event_type': message['event_type']})
                         continue
                     except stomp.exception.NotConnectedException as error:
-                        logging.warn('Could not deliver message due to NotConnectedException: %s',
-                                     str(error))
+                        logging.warning('Could not deliver message due to NotConnectedException: %s',
+                                        str(error))
                         continue
                     except stomp.exception.ConnectFailedException as error:
-                        logging.warn('Could not deliver message due to ConnectFailedException: %s',
-                                     str(error))
+                        logging.warning('Could not deliver message due to ConnectFailedException: %s',
+                                        str(error))
                         continue
                     except Exception as error:
-                        logging.warn('Could not deliver message: %s', str(error))
+                        logging.warning('Could not deliver message: %s', str(error))
                         logging.critical(traceback.format_exc())
                         continue
 
@@ -391,6 +398,8 @@ def run(once=False, send_email=True, threads=1, bulk=1000, delay=10, broker_time
     '''
     Starts up the hermes threads.
     '''
+    if rucio.db.sqla.util.is_old_db():
+        raise exception.DatabaseException('Database was not updated, daemon won\'t start')
 
     logging.info('resolving brokers')
 

@@ -1,4 +1,5 @@
-# Copyright 2015-2018 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2015-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,16 +14,16 @@
 # limitations under the License.
 #
 # Authors:
-# - Wen Guan <wguan.icedew@gmail.com>, 2015-2016
+# - Wen Guan <wen.guan@cern.ch>, 2015-2016
 # - Mario Lassnig <mario.lassnig@cern.ch>, 2015
 # - Martin Barisits <martin.barisits@cern.ch>, 2015-2018
-# - Vincent Garonne <vgaronne@gmail.com>, 2015-2018
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2015-2018
 # - Cedric Serfon <cedric.serfon@cern.ch>, 2018
 # - Robert Illingworth <illingwo@fnal.gov>, 2018
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018
 # - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
-#
-# PY3K COMPATIBLE
+# - Thomas Beermann <thomas.beermann@cern.ch>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
 """
 Conveyor is a daemon to manage file transfers.
@@ -42,13 +43,14 @@ import traceback
 
 import stomp
 
-from rucio.common.config import config_get, config_get_int
+import rucio.db.sqla.util
+from rucio.common import exception
+from rucio.common.config import config_get, config_get_bool, config_get_int
 from rucio.common.policy import get_policy
 from rucio.core import heartbeat, request
 from rucio.core.monitor import record_counter
 from rucio.core.transfer import set_transfer_update_time
 from rucio.db.sqla.constants import RequestState, FTSCompleteState
-
 
 logging.getLogger("stomp").setLevel(logging.CRITICAL)
 
@@ -184,7 +186,7 @@ def receiver(id, total_threads=1, full_mode=False):
 
     logging.info('receiver starting in full mode: %s' % full_mode)
 
-    executable = ' '.join(sys.argv)
+    executable = 'conveyor-receiver'
     hostname = socket.getfqdn()
     pid = os.getpid()
     hb_thread = threading.current_thread()
@@ -209,14 +211,37 @@ def receiver(id, total_threads=1, full_mode=False):
 
     logging.info('brokers resolved to %s', brokers_resolved)
 
+    logging.info('checking authentication method')
+    use_ssl = True
+    try:
+        use_ssl = config_get_bool('messaging-fts3', 'use_ssl')
+    except:
+        logging.info('could not find use_ssl in configuration -- please update your rucio.cfg')
+
+    port = config_get_int('messaging-fts3', 'port')
+    vhost = config_get('messaging-fts3', 'broker_virtual_host', raise_exception=False)
+    if not use_ssl:
+        username = config_get('messaging-fts3', 'username')
+        password = config_get('messaging-fts3', 'password')
+        port = config_get_int('messaging-fts3', 'nonssl_port')
+
     conns = []
     for broker in brokers_resolved:
-        conns.append(stomp.Connection(host_and_ports=[(broker, config_get_int('messaging-fts3', 'port'))],
-                                      use_ssl=True,
-                                      ssl_key_file=config_get('messaging-fts3', 'ssl_key_file'),
-                                      ssl_cert_file=config_get('messaging-fts3', 'ssl_cert_file'),
-                                      vhost=config_get('messaging-fts3', 'broker_virtual_host', raise_exception=False),
-                                      reconnect_attempts_max=999))
+        if not use_ssl:
+            logging.info('setting up username/password authentication: %s' % broker)
+            con = stomp.Connection12(host_and_ports=[(broker, port)],
+                                     use_ssl=False,
+                                     vhost=vhost,
+                                     reconnect_attempts_max=999)
+        else:
+            logging.info('setting up ssl cert/key authentication: %s' % broker)
+            con = stomp.Connection12(host_and_ports=[(broker, port)],
+                                     use_ssl=True,
+                                     ssl_key_file=config_get('messaging-fts3', 'ssl_key_file'),
+                                     ssl_cert_file=config_get('messaging-fts3', 'ssl_cert_file'),
+                                     vhost=vhost,
+                                     reconnect_attempts_max=999)
+        conns.append(con)
 
     logging.info('receiver started')
 
@@ -232,7 +257,10 @@ def receiver(id, total_threads=1, full_mode=False):
 
                 conn.set_listener('rucio-messaging-fts3', Receiver(broker=conn.transport._Transport__host_and_ports[0], id=id, total_threads=total_threads, full_mode=full_mode))
                 conn.start()
-                conn.connect()
+                if not use_ssl:
+                    conn.connect(username, password, wait=True)
+                else:
+                    conn.connect(wait=True)
                 conn.subscribe(destination=config_get('messaging-fts3', 'destination'),
                                id='rucio-messaging-fts3',
                                ack='auto')
@@ -264,6 +292,8 @@ def run(once=False, total_threads=1, full_mode=False):
     """
     Starts up the receiver thread
     """
+    if rucio.db.sqla.util.is_old_db():
+        raise exception.DatabaseException('Database was not updated, daemon won\'t start')
 
     logging.info('starting receiver thread')
     threads = [threading.Thread(target=receiver, kwargs={'id': i,

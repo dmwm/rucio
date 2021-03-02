@@ -1,4 +1,5 @@
-# Copyright 2012-2018 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2012-2021 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,23 +14,27 @@
 # limitations under the License.
 #
 # Authors:
-# - Vincent Garonne <vgaronne@gmail.com>, 2012-2018
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2012-2018
 # - Ralph Vigne <ralph.vigne@cern.ch>, 2012-2015
-# - Mario Lassnig <mario.lassnig@cern.ch>, 2012-2019
-# - Martin Barisits <martin.barisits@cern.ch>, 2013-2018
+# - Mario Lassnig <mario.lassnig@cern.ch>, 2012-2021
+# - Martin Barisits <martin.barisits@cern.ch>, 2013-2020
 # - Cedric Serfon <cedric.serfon@cern.ch>, 2013-2018
 # - Thomas Beermann <thomas.beermann@cern.ch>, 2014-2017
-# - Wen Guan <wguan.icedew@gmail.com>, 2015-2016
+# - Wen Guan <wen.guan@cern.ch>, 2015-2016
 # - Brian Bockelman <bbockelm@cse.unl.edu>, 2018
 # - Frank Berghaus <frank.berghaus@cern.ch>, 2018
-# - Dimitrios Christidis <dimitrios.christidis@cern.ch>, 2018-2019
-# - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018
-# - Gabriele Fronze' <gfronze@cern.ch>, 2019
+# - Joaquín Bogado <jbogado@linti.unlp.edu.ar>, 2018
+# - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
+# - Dimitrios Christidis <dimitrios.christidis@cern.ch>, 2018-2020
+# - James Perry <j.perry@epcc.ed.ac.uk>, 2019
 # - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
-# - Brandon White <bjwhite@fnal.gov>, 2019-2020
+# - Brandon White <bjwhite@fnal.gov>, 2019
+# - Gabriele Fronze' <gfronze@cern.ch>, 2019
 # - Aristeidis Fkiaras <aristeidis.fkiaras@cern.ch>, 2019
-#
-# PY3K COMPATIBLE
+# - Patrick Austin <patrick.austin@stfc.ac.uk>, 2020
+# - Eli Chadwick <eli.chadwick@stfc.ac.uk>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
+# - Tomas Javurek <tomas.javurek@cern.ch>, 2020
 
 from __future__ import division
 
@@ -71,12 +76,13 @@ REGION = make_region().configure('dogpile.cache.memcached',
 
 
 @transactional_session
-def add_rse(rse, deterministic=True, volatile=False, city=None, region_code=None, country_name=None, continent=None, time_zone=None,
+def add_rse(rse, vo='def', deterministic=True, volatile=False, city=None, region_code=None, country_name=None, continent=None, time_zone=None,
             ISP=None, staging_area=False, rse_type=RSEType.DISK, longitude=None, latitude=None, ASN=None, availability=7, session=None):
     """
     Add a rse with the given location name.
 
     :param rse: the name of the new rse.
+    :param vo: the vo to add the RSE to.
     :param deterministic: Boolean to know if the pfn is generated deterministically.
     :param volatile: Boolean for RSE cache.
     :param city: City for the RSE.
@@ -94,9 +100,9 @@ def add_rse(rse, deterministic=True, volatile=False, city=None, region_code=None
     :param session: The database session in use.
     """
     if isinstance(rse_type, string_types):
-        rse_type = RSEType.from_string(str(rse_type))
+        rse_type = RSEType(rse_type)
 
-    new_rse = models.RSE(rse=rse, deterministic=deterministic, volatile=volatile, city=city,
+    new_rse = models.RSE(rse=rse, vo=vo, deterministic=deterministic, volatile=volatile, city=city,
                          region_code=region_code, country_name=country_name,
                          continent=continent, time_zone=time_zone, staging_area=staging_area, ISP=ISP, availability=availability,
                          rse_type=rse_type, longitude=longitude, latitude=latitude, ASN=ASN)
@@ -120,16 +126,17 @@ def add_rse(rse, deterministic=True, volatile=False, city=None, region_code=None
 
 
 @read_session
-def rse_exists(rse, include_deleted=False, session=None):
+def rse_exists(rse, vo='def', include_deleted=False, session=None):
     """
     Checks to see if RSE exists.
 
     :param rse: Name of the rse.
+    :param vo: The VO for the RSE.
     :param session: The database session in use.
 
     :returns: True if found, otherwise false.
     """
-    return True if session.query(models.RSE).filter_by(rse=rse, deleted=include_deleted).first() else False
+    return True if session.query(models.RSE).filter_by(rse=rse, vo=vo, deleted=include_deleted).first() else False
 
 
 @read_session
@@ -158,7 +165,6 @@ def sort_rses(rses, session=None):
         condition.append(models.RSE.id == rse['id'])
     query = query.filter(or_(*condition)).order_by(models.RSEUsage.free.asc())
     return [{'rse': rse, 'staging_area': staging_area, 'id': rse_id} for rse, staging_area, rse_id in query]
-    # return sample(rses, len(rses))
 
 
 @transactional_session
@@ -247,7 +253,7 @@ def get_rse(rse_id, session=None):
 
 
 @read_session
-def get_rse_id(rse, session=None, include_deleted=True):
+def get_rse_id(rse, vo='def', session=None, include_deleted=True):
     """
     Get a RSE ID or raise if it does not exist.
 
@@ -261,18 +267,21 @@ def get_rse_id(rse, session=None, include_deleted=True):
     """
 
     if include_deleted:
-        cache_key = 'rse-id_{}'.format(rse).replace(' ', '.')
+        if vo != 'def':
+            cache_key = 'rse-id_{}@{}'.format(rse, vo).replace(' ', '.')
+        else:
+            cache_key = 'rse-id_{}'.format(rse).replace(' ', '.')
         result = REGION.get(cache_key)
         if result != NO_VALUE:
             return result
 
     try:
-        query = session.query(models.RSE.id).filter_by(rse=rse)
+        query = session.query(models.RSE.id).filter_by(rse=rse, vo=vo)
         if not include_deleted:
             query = query.filter_by(deleted=False)
         result = query.one()[0]
     except sqlalchemy.orm.exc.NoResultFound:
-        raise exception.RSENotFound('RSE \'%s\' cannot be found' % rse)
+        raise exception.RSENotFound("RSE '%s' cannot be found in vo '%s'" % (rse, vo))
 
     if include_deleted:
         REGION.set(cache_key, result)
@@ -313,6 +322,39 @@ def get_rse_name(rse_id, session=None, include_deleted=True):
 
 
 @read_session
+def get_rse_vo(rse_id, session=None, include_deleted=True):
+    """
+    Get the VO for a given RSE id.
+
+    :param rse_id: the rse uuid from the database.
+    :param session: the database session in use.
+    :param include_deleted: Flag to toggle finding rse's marked as deleted.
+
+    :returns The vo name.
+
+    :raises RSENotFound: If referred RSE was not found in database.
+    """
+
+    if include_deleted:
+        cache_key = 'rse-vo_{}'.format(rse_id)
+        result = REGION.get(cache_key)
+        if result != NO_VALUE:
+            return result
+
+    try:
+        query = session.query(models.RSE.vo).filter_by(id=rse_id)
+        if not include_deleted:
+            query = query.filter_by(deleted=False)
+        result = query.one()[0]
+    except sqlalchemy.orm.exc.NoResultFound:
+        raise exception.RSENotFound('RSE with ID \'%s\' cannot be found' % rse_id)
+
+    if include_deleted:
+        REGION.set(cache_key, result)
+    return result
+
+
+@read_session
 def list_rses(filters={}, session=None):
     """
     Returns a list of all RSEs.
@@ -328,6 +370,13 @@ def list_rses(filters={}, session=None):
     availability_mask2 = 7
     availability_mapping = {'availability_read': 4, 'availability_write': 2, 'availability_delete': 1}
     false_value = False  # To make pep8 checker happy ...
+
+    if filters and filters.get('vo'):
+        filters = filters.copy()  # Make a copy so we can pop('vo') without affecting the object `filters` outside this function
+        vo = filters.pop('vo')
+    else:
+        vo = None
+
     if filters:
         if 'availability' in filters and ('availability_read' in filters or 'availability_write' in filters or 'availability_delete' in filters):
             raise exception.InvalidObject('Cannot use availability and read, write, delete filter at the same time.')
@@ -338,7 +387,7 @@ def list_rses(filters={}, session=None):
         for (k, v) in filters.items():
             if hasattr(models.RSE, k):
                 if k == 'rse_type':
-                    query = query.filter(getattr(models.RSE, k) == RSEType.from_sym(v))
+                    query = query.filter(getattr(models.RSE, k) == RSEType[v])
                 else:
                     query = query.filter(getattr(models.RSE, k) == v)
             elif k in ['availability_read', 'availability_write', 'availability_delete']:
@@ -361,20 +410,18 @@ def list_rses(filters={}, session=None):
 
         if 'availability' not in filters:
             query = query.filter(sqlalchemy.and_(sqlalchemy.or_(*condition1), sqlalchemy.or_(*condition2)))
-
-        for row in query:
-            d = {}
-            for column in row.__table__.columns:
-                d[column.name] = getattr(row, column.name)
-            rse_list.append(d)
     else:
 
         query = session.query(models.RSE).filter_by(deleted=False).order_by(models.RSE.rse)
-        for row in query:
-            dic = {}
-            for column in row.__table__.columns:
-                dic[column.name] = getattr(row, column.name)
-            rse_list.append(dic)
+
+    if vo:
+        query = query.filter(getattr(models.RSE, 'vo') == vo)
+
+    for row in query:
+        dic = {}
+        for column in row.__table__.columns:
+            dic[column.name] = getattr(row, column.name)
+        rse_list.append(dic)
 
     return rse_list
 
@@ -482,7 +529,7 @@ def get_rses_with_attribute(key, session=None):
 
 
 @read_session
-def get_rses_with_attribute_value(key, value, lookup_key, session=None):
+def get_rses_with_attribute_value(key, value, lookup_key, vo='def', session=None):
     """
     Return all RSEs with a certain attribute.
 
@@ -493,8 +540,12 @@ def get_rses_with_attribute_value(key, value, lookup_key, session=None):
 
     :returns: List of rse dictionaries with the rse_id and lookup_key/value pair
     """
+    if vo != 'def':
+        cache_key = 'av-%s-%s-%s@%s' % (key, value, lookup_key, vo)
+    else:
+        cache_key = 'av-%s-%s-%s' % (key, value, lookup_key)
 
-    result = REGION.get('av-%s-%s-%s' % (key, value, lookup_key))
+    result = REGION.get(cache_key)
     if result is NO_VALUE:
 
         rse_list = []
@@ -510,14 +561,15 @@ def get_rses_with_attribute_value(key, value, lookup_key, session=None):
                        .join(models.RSE, models.RSE.id == models.RSEAttrAssociation.rse_id)\
                        .join(subquery, models.RSEAttrAssociation.rse_id == subquery.c.rse_id)\
                        .filter(models.RSE.deleted == false(),
-                               models.RSEAttrAssociation.key == lookup_key)
+                               models.RSEAttrAssociation.key == lookup_key,
+                               models.RSE.vo == vo)
 
         for row in query:
             rse_list.append({'rse_id': row[0],
                              'key': row[1],
                              'value': row[2]})
 
-        REGION.set('av-%s-%s-%s' % (key, value, lookup_key), rse_list)
+        REGION.set(cache_key, rse_list)
         return rse_list
 
     return result
@@ -653,7 +705,7 @@ def get_rse_usage(rse_id, source=None, session=None, per_account=False):
                      'total': total,
                      'files': row.files,
                      'updated_at': row.updated_at}
-        if per_account:
+        if per_account and row.source == 'rucio':
             query_account_usage = session.query(models.AccountUsage).filter_by(rse_id=rse_id)
             account_usages = []
             for row in query_account_usage:
@@ -673,7 +725,7 @@ def set_rse_limits(rse_id, name, value, session=None):
 
     :param rse_id: The RSE id.
     :param name: The name of the limit.
-    :param value: The feature value. Set to -1 to remove the limit.
+    :param value: The feature value.
     :param session: The database session in use.
 
     :returns: True if successful, otherwise false.
@@ -705,7 +757,7 @@ def get_rse_limits(rse_id, name=None, session=None):
 
 
 @transactional_session
-def delete_rse_limit(rse_id, name=None, session=None):
+def delete_rse_limits(rse_id, name=None, session=None):
     """
     Delete RSE limit.
 
@@ -882,17 +934,21 @@ def add_protocol(rse_id, parameter, session=None):
         new_protocol.save(session=session)
     except (IntegrityError, FlushError, OperationalError) as error:
         if ('UNIQUE constraint failed' in error.args[0]) or ('conflicts with persistent instance' in error.args[0]) \
-           or match('.*IntegrityError.*ORA-00001: unique constraint.*RSE_PROTOCOLS_PK.*violated.*', error.args[0]) \
-           or match('.*IntegrityError.*1062.*Duplicate entry.*for key.*', error.args[0]) \
-           or match('.*IntegrityError.*duplicate key value violates unique constraint.*', error.args[0])\
-           or match('.*UniqueViolation.*duplicate key value violates unique constraint.*', error.args[0])\
-           or match('.*IntegrityError.*columns.*are not unique.*', error.args[0]):
+                or match('.*IntegrityError.*ORA-00001: unique constraint.*RSE_PROTOCOLS_PK.*violated.*', error.args[0]) \
+                or match('.*IntegrityError.*1062.*Duplicate entry.*for key.*', error.args[0]) \
+                or match('.*IntegrityError.*duplicate key value violates unique constraint.*', error.args[0]) \
+                or match('.*UniqueViolation.*duplicate key value violates unique constraint.*', error.args[0]) \
+                or match('.*IntegrityError.*columns.*are not unique.*', error.args[0]):
             raise exception.Duplicate('Protocol \'%s\' on port %s already registered for  \'%s\' with hostname \'%s\'.' % (parameter['scheme'], parameter['port'], rse, parameter['hostname']))
         elif 'may not be NULL' in error.args[0] \
-             or match('.*IntegrityError.*ORA-01400: cannot insert NULL into.*RSE_PROTOCOLS.*IMPL.*', error.args[0]) \
-             or match('.*OperationalError.*cannot be null.*', error.args[0]):
+                or match('.*IntegrityError.*ORA-01400: cannot insert NULL into.*RSE_PROTOCOLS.*IMPL.*', error.args[0]) \
+                or match('.*IntegrityError.*Column.*cannot be null.*', error.args[0]) \
+                or match('.*IntegrityError.*null value in column.*violates not-null constraint.*', error.args[0]) \
+                or match('.*NotNullViolation.*null value in column.*violates not-null constraint.*', error.args[0]) \
+                or match('.*OperationalError.*cannot be null.*', error.args[0]):
             raise exception.InvalidObject('Missing values!')
-        raise error
+
+        raise exception.RucioException(error.args)
     return new_protocol
 
 
@@ -931,21 +987,22 @@ def get_rse_protocols(rse_id, schemes=None, session=None):
     write = True if _rse.availability & 2 else False
     delete = True if _rse.availability & 1 else False
 
-    info = {'id': _rse.id,
-            'rse': _rse.rse,
+    info = {'availability_delete': delete,
             'availability_read': read,
             'availability_write': write,
-            'availability_delete': delete,
-            'domain': utils.rse_supported_protocol_domains(),
-            'protocols': list(),
-            'deterministic': _rse.deterministic,
-            'lfn2pfn_algorithm': lfn2pfn_algorithm,
-            'rse_type': str(_rse.rse_type),
             'credentials': None,
-            'volatile': _rse.volatile,
-            'verify_checksum': verify_checksum[0] if verify_checksum else True,
+            'deterministic': _rse.deterministic,
+            'domain': utils.rse_supported_protocol_domains(),
+            'id': _rse.id,
+            'lfn2pfn_algorithm': lfn2pfn_algorithm,
+            'protocols': list(),
+            'qos_class': _rse.qos_class,
+            'rse': _rse.rse,
+            'rse_type': _rse.rse_type.name,
             'sign_url': sign_url[0] if sign_url else None,
-            'staging_area': _rse.staging_area}
+            'staging_area': _rse.staging_area,
+            'verify_checksum': verify_checksum[0] if verify_checksum else True,
+            'volatile': _rse.volatile}
 
     for op in utils.rse_supported_protocol_operations():
         info['%s_protocol' % op] = 1  # 1 indicates the default protocol
@@ -1182,28 +1239,37 @@ def update_rse(rse_id, parameters, session=None):
     try:
         query = session.query(models.RSE).filter_by(id=rse_id).one()
     except sqlalchemy.orm.exc.NoResultFound:
-        raise exception.RSENotFound('RSE \'%s\' cannot be found' % rse_id)
+        raise exception.RSENotFound('RSE with ID \'%s\' cannot be found' % rse_id)
     availability = 0
     rse = query.rse
     for column in query:
         if column[0] == 'availability':
             availability = column[1] or availability
+
     param = {}
     availability_mapping = {'availability_read': 4, 'availability_write': 2, 'availability_delete': 1}
+
     for key in parameters:
-        if key == 'name':
+        if key == 'name' and parameters['name'] != rse:  # Needed due to wrongly setting name in pre1.22.7 clients
             param['rse'] = parameters['name']
         elif key in ['availability_read', 'availability_write', 'availability_delete']:
             if parameters[key] is True:
                 availability = availability | availability_mapping[key]
             else:
                 availability = availability & ~availability_mapping[key]
-        elif key in ['latitude', 'longitude', 'time_zone', 'rse_type', 'volatile', 'deterministic', 'region_code', 'country_name', 'city', 'staging_area']:
+        elif key in ['latitude', 'longitude', 'time_zone', 'rse_type', 'volatile', 'deterministic', 'region_code', 'country_name', 'city', 'staging_area', 'qos_class']:
             param[key] = parameters[key]
     param['availability'] = availability
+
+    # handle null-able keys
+    for key in parameters:
+        if key in ['qos_class']:
+            if param[key] and param[key].lower() in ['', 'none', 'null']:
+                param[key] = None
+
     query.update(param)
-    if 'name' in parameters:
-        add_rse_attribute(rse_id=rse_id, key=parameters['name'], value=1, session=session)
+    if 'rse' in param:
+        add_rse_attribute(rse_id=rse_id, key=parameters['name'], value=True, session=session)
         query = session.query(models.RSEAttrAssociation).filter_by(rse_id=rse_id).filter(models.RSEAttrAssociation.key == rse)
         rse_attr = query.one()
         rse_attr.delete(session=session)
@@ -1250,3 +1316,77 @@ def export_rse(rse_id, session=None):
     rse_data['MaxBeingDeletedFiles'] = limits.get('MaxBeingDeletedFiles')
 
     return rse_data
+
+
+@transactional_session
+def add_qos_policy(rse_id, qos_policy, session=None):
+    """
+    Add a QoS policy from an RSE.
+
+    :param rse_id: The id of the RSE.
+    :param qos_policy: The QoS policy to add.
+    :param session: The database session in use.
+
+    :raises Duplicate: If the QoS policy already exists.
+    :returns: True if successful, except otherwise.
+    """
+
+    try:
+        new_qos_policy = models.RSEQoSAssociation()
+        new_qos_policy.update({'rse_id': rse_id,
+                               'qos_policy': qos_policy})
+        new_qos_policy.save(session=session)
+    except (IntegrityError, FlushError, OperationalError) as error:
+        if ('UNIQUE constraint failed' in error.args[0]) or ('conflicts with persistent instance' in error.args[0]) \
+           or match('.*IntegrityError.*ORA-00001: unique constraint.*RSE_PROTOCOLS_PK.*violated.*', error.args[0]) \
+           or match('.*IntegrityError.*1062.*Duplicate entry.*for key.*', error.args[0]) \
+           or match('.*IntegrityError.*duplicate key value violates unique constraint.*', error.args[0])\
+           or match('.*UniqueViolation.*duplicate key value violates unique constraint.*', error.args[0])\
+           or match('.*IntegrityError.*columns.*are not unique.*', error.args[0]):
+            raise exception.Duplicate('QoS policy %s already exists!' % qos_policy)
+    except DatabaseError as error:
+        raise exception.RucioException(error.args)
+
+    return True
+
+
+@transactional_session
+def delete_qos_policy(rse_id, qos_policy, session=None):
+    """
+    Delete a QoS policy from an RSE.
+
+    :param rse_id: The id of the RSE.
+    :param qos_policy: The QoS policy to delete.
+    :param session: The database session in use.
+
+    :returns: True if successful, silent failure if QoS policy does not exist.
+    """
+
+    try:
+        session.query(models.RSEQoSAssociation.qos_policy).filter_by(rse_id=rse_id, qos_policy=qos_policy).delete()
+    except DatabaseError as error:
+        raise exception.RucioException(error.args)
+
+    return True
+
+
+@read_session
+def list_qos_policies(rse_id, session=None):
+    """
+    List all QoS policies of an RSE.
+
+    :param rse_id: The id of the RSE.
+    :param session: The database session in use.
+
+    :returns: List containing all QoS policies.
+    """
+
+    qos_policies = []
+    try:
+        query = session.query(models.RSEQoSAssociation.qos_policy).filter_by(rse_id=rse_id)
+        for qos_policy in query:
+            qos_policies.append(qos_policy[0])
+    except DatabaseError as error:
+        raise exception.RucioException(error.args)
+
+    return qos_policies

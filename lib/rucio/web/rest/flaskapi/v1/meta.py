@@ -1,5 +1,5 @@
-#!/usr/bin/env python
-# Copyright 2012-2018 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2012-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,29 +18,19 @@
 # - Vincent Garonne <vincent.garonne@cern.ch>, 2012-2017
 # - Mario Lassnig <mario.lassnig@cern.ch>, 2018
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
-#
-# PY3K COMPATIBLE
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
-from json import dumps, loads
-from logging import getLogger, StreamHandler, DEBUG
-from flask import Flask, Blueprint, request, Response
+from json import loads
+from traceback import format_exc
+
+from flask import Flask, Blueprint, request, jsonify
 from flask.views import MethodView
 
 from rucio.api.meta import add_key, add_value, list_keys, list_values
 from rucio.common.exception import Duplicate, InvalidValueForKey, KeyNotFound, UnsupportedValueType, RucioException, UnsupportedKeyType
-from rucio.common.utils import generate_http_error_flask
-from rucio.web.rest.flaskapi.v1.common import before_request, after_request, check_accept_header_wrapper_flask
-
-
-LOGGER = getLogger("rucio.meta")
-SH = StreamHandler()
-SH.setLevel(DEBUG)
-LOGGER.addHandler(SH)
-
-URLS = ('/(.+)/(.+)', 'Values',
-        '/(.+)/', 'Values',
-        '/(.+)', 'Meta',
-        '/', 'Meta',)
+from rucio.web.rest.flaskapi.v1.common import check_accept_header_wrapper_flask, request_auth_env, response_headers
+from rucio.web.rest.utils import generate_http_error_flask
 
 
 class Meta(MethodView):
@@ -60,7 +50,7 @@ class Meta(MethodView):
         :status 500: Internal Error.
         :returns: List of all DID keys.
         """
-        return Response(dumps(list_keys()), content_type="application/json")
+        return jsonify(list_keys())
 
     def post(self, key):
         """
@@ -76,7 +66,7 @@ class Meta(MethodView):
         :status 409: Key already exists.
         :status 500: Internal Error.
         """
-        json_data = request.data
+        json_data = request.data.decode()
         try:
             params = json_data and loads(json_data)
             if params and 'value_type' in params:
@@ -89,7 +79,7 @@ class Meta(MethodView):
             return generate_http_error_flask(400, 'ValueError', 'Cannot decode json parameter list')
 
         try:
-            add_key(key=key, key_type=key_type, value_type=value_type, value_regexp=value_regexp, issuer=request.environ.get('issuer'))
+            add_key(key=key, key_type=key_type, value_type=value_type, value_regexp=value_regexp, issuer=request.environ.get('issuer'), vo=request.environ.get('vo'))
         except Duplicate as error:
             return generate_http_error_flask(409, 'Duplicate', error.args[0])
         except UnsupportedValueType as error:
@@ -99,9 +89,10 @@ class Meta(MethodView):
         except RucioException as error:
             return generate_http_error_flask(500, error.__class__.__name__, error.args[0])
         except Exception as error:
-            return error, 500
+            print(format_exc())
+            return str(error), 500
 
-        return "Created", 201
+        return 'Created', 201
 
 
 class Values(MethodView):
@@ -121,7 +112,7 @@ class Values(MethodView):
         :status 500: Internal Error.
         :returns: List of all key values.
         """
-        return Response(dumps(list_values(key=key)), content_type="application/json")
+        return jsonify(list_values(key=key))
 
     def post(self, key):
         """
@@ -146,7 +137,7 @@ class Values(MethodView):
             return generate_http_error_flask(400, 'ValueError', 'Cannot decode json parameter list')
 
         try:
-            add_value(key=key, value=value, issuer=request.environ.get('issuer'))
+            add_value(key=key, value=value, issuer=request.environ.get('issuer'), vo=request.environ.get('vo'))
         except Duplicate as error:
             return generate_http_error_flask(409, 'Duplicate', error.args[0])
         except InvalidValueForKey as error:
@@ -156,34 +147,28 @@ class Values(MethodView):
         except RucioException as error:
             return generate_http_error_flask(500, error.__class__.__name__, error.args[0])
         except Exception as error:
-            return error, 500
+            print(format_exc())
+            return str(error), 500
 
-        return "Created", 201
+        return 'Created', 201
 
 
-"""----------------------
-   Web service startup
-----------------------"""
-bp = Blueprint('meta', __name__)
+def blueprint():
+    bp = Blueprint('meta', __name__, url_prefix='/meta')
 
-meta_view = Meta.as_view('meta')
-bp.add_url_rule('/', view_func=meta_view, methods=['get', ])
-bp.add_url_rule('/<key>', view_func=meta_view, methods=['post', ])
-values_view = Values.as_view('values')
-bp.add_url_rule('/<key>/', view_func=values_view, methods=['get', 'post'])
+    meta_view = Meta.as_view('meta')
+    bp.add_url_rule('/', view_func=meta_view, methods=['get', ])
+    bp.add_url_rule('/<key>', view_func=meta_view, methods=['post', ])
+    values_view = Values.as_view('values')
+    bp.add_url_rule('/<key>/', view_func=values_view, methods=['get', 'post'])
 
-application = Flask(__name__)
-application.register_blueprint(bp)
-application.before_request(before_request)
-application.after_request(after_request)
+    bp.before_request(request_auth_env)
+    bp.after_request(response_headers)
+    return bp
 
 
 def make_doc():
-    """ Only used for sphinx documentation to add the prefix """
+    """ Only used for sphinx documentation """
     doc_app = Flask(__name__)
-    doc_app.register_blueprint(bp, url_prefix='/meta')
+    doc_app.register_blueprint(blueprint())
     return doc_app
-
-
-if __name__ == "__main__":
-    application.run()

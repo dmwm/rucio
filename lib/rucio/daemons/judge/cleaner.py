@@ -1,4 +1,5 @@
-# Copyright 2013-2018 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2013-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,14 +14,14 @@
 # limitations under the License.
 #
 # Authors:
-# - Martin Barisits <martin.barisits@cern.ch>, 2013-2016
+# - Martin Barisits <martin.barisits@cern.ch>, 2013-2018
 # - Mario Lassnig <mario.lassnig@cern.ch>, 2013-2015
 # - Cedric Serfon <cedric.serfon@cern.ch>, 2013
-# - Vincent Garonne <vgaronne@gmail.com>, 2014-2018
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2014-2018
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
-# - Brandon White <bjwhite@fnal.gov>, 2019-2020
-#
-# PY3K COMPATIBLE
+# - Brandon White <bjwhite@fnal.gov>, 2019
+# - Thomas Beermann <thomas.beermann@cern.ch>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
 """
 Judge-Cleaner is a daemon to clean expired replication rules.
@@ -33,20 +34,20 @@ import sys
 import threading
 import time
 import traceback
-
-
 from copy import deepcopy
 from datetime import datetime, timedelta
-from re import match
 from random import randint
+from re import match
 
 from sqlalchemy.exc import DatabaseError
 
+import rucio.db.sqla.util
+from rucio.common import exception
 from rucio.common.config import config_get
 from rucio.common.exception import DatabaseException, UnsupportedOperation, RuleNotFound
 from rucio.core.heartbeat import live, die, sanity_check
-from rucio.core.rule import delete_rule, get_expired_rules
 from rucio.core.monitor import record_counter
+from rucio.core.rule import delete_rule, get_expired_rules
 from rucio.db.sqla.util import get_db_time
 
 graceful_stop = threading.Event()
@@ -71,13 +72,14 @@ def rule_cleaner(once=False):
     paused_rules = {}  # {rule_id: datetime}
 
     # Make an initial heartbeat so that all judge-cleaners have the correct worker number on the next try
-    live(executable='rucio-judge-cleaner', hostname=hostname, pid=pid, thread=current_thread)
+    executable = 'judge-cleaner'
+    live(executable=executable, hostname=hostname, pid=pid, thread=current_thread)
     graceful_stop.wait(1)
 
     while not graceful_stop.is_set():
         try:
             # heartbeat
-            heartbeat = live(executable='rucio-judge-cleaner', hostname=hostname, pid=pid, thread=current_thread)
+            heartbeat = live(executable=executable, hostname=hostname, pid=pid, thread=current_thread)
 
             start = time.time()
 
@@ -121,7 +123,7 @@ def rule_cleaner(once=False):
                         else:
                             logging.error(traceback.format_exc())
                             record_counter('rule.judge.exceptions.%s' % e.__class__.__name__)
-                    except RuleNotFound as e:
+                    except RuleNotFound:
                         pass
         except (DatabaseException, DatabaseError) as e:
             if match('.*QueuePool.*', str(e.args[0])):
@@ -139,7 +141,7 @@ def rule_cleaner(once=False):
         if once:
             break
 
-    die(executable='rucio-judge-cleaner', hostname=hostname, pid=pid, thread=current_thread)
+    die(executable=executable, hostname=hostname, pid=pid, thread=current_thread)
 
 
 def stop(signum=None, frame=None):
@@ -153,6 +155,9 @@ def run(once=False, threads=1):
     """
     Starts up the Judge-Clean threads.
     """
+    if rucio.db.sqla.util.is_old_db():
+        raise exception.DatabaseException('Database was not updated, daemon won\'t start')
+
     client_time, db_time = datetime.utcnow(), get_db_time()
     max_offset = timedelta(hours=1, seconds=10)
     if type(db_time) is datetime:
@@ -160,8 +165,9 @@ def run(once=False, threads=1):
             logging.critical('Offset between client and db time too big. Stopping Cleaner')
             return
 
+    executable = 'judge-cleaner'
     hostname = socket.gethostname()
-    sanity_check(executable='rucio-judge-cleaner', hostname=hostname)
+    sanity_check(executable=executable, hostname=hostname)
 
     if once:
         rule_cleaner(once)

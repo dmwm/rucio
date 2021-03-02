@@ -1,4 +1,5 @@
-# Copyright 2012-2018 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2015-2020 CERN for the benefit of the ATLAS collaboration.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,14 +14,15 @@
 # limitations under the License.
 #
 # Authors:
-# - Fernando Lopez <felopez@cern.ch>, 2015
+# - Fernando López <felopez@cern.ch>, 2015
 # - Mario Lassnig <mario.lassnig@cern.ch>, 2017-2018
 # - Dimitrios Christidis <dimitrios.christidis@cern.ch>, 2018
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 #
 # PY3K COMPATIBLE
 
-from rucio.common.config import __CONFIGFILES as __RUCIOCONFIGFILES
+from rucio.common.config import get_config_dirs
 from rucio.common.dumper import DUMPS_CACHE_DIR
 from rucio.common.dumper import http_download_to_file, gfal_download_to_file, ddmendpoint_url, temp_file
 
@@ -50,8 +52,8 @@ except ImportError as e:
 
 CHUNK_SIZE = 10485760
 
-__DUMPERCONFIGDIRS = ('/'.join(cfg.split('/')[:-1]) + '/auditor' for cfg in __RUCIOCONFIGFILES)
-__DUMPERCONFIGDIRS = [cfg for cfg in __DUMPERCONFIGDIRS if os.path.isdir(cfg)]
+__DUMPERCONFIGDIRS = (os.path.join(confdir, 'auditor') for confdir in get_config_dirs())
+__DUMPERCONFIGDIRS = list(filter(os.path.exists, __DUMPERCONFIGDIRS))
 
 
 class Parser(ConfigParser.RawConfigParser, object):
@@ -117,7 +119,7 @@ def get_newest(base_url, url_pattern, links):
     if not times:
         msg = 'No links found matching the pattern {0} in {1}'.format(date_pattern, links)
         logger.error(msg)
-        raise Exception(msg)
+        raise RuntimeError(msg)
 
     return max(times, key=operator.itemgetter(1))
 
@@ -193,7 +195,7 @@ def protocol(url):
     '''
     proto = url.split('://')[0]
     if proto not in protocol_funcs:
-        raise Exception('Protocol {0} not supported'.format(proto))
+        raise RuntimeError('Protocol {0} not supported'.format(proto))
 
     return proto
 
@@ -266,7 +268,7 @@ def download_rse_dump(rse, configuration, date='latest', destdir=DUMPS_CACHE_DIR
         'ddmendpoint',
         rse,
         date.strftime('%d-%m-%Y'),
-        hashlib.sha1(url).hexdigest()
+        hashlib.sha1(url.encode()).hexdigest()
     )
     filename = re.sub(r'\W', '-', filename)
     path = os.path.join(destdir, filename)

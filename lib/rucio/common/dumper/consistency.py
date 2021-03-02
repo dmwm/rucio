@@ -17,6 +17,7 @@
 # - Joaquin Bogado <jbogado@linti.unlp.edu.ar>, 2018
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
 # - Mario Lassnig <mario.lassnig@cern.ch>, 2019
+# - Dimitrios Christidis <dimitrios.christidis@cern.ch>, 2020
 #
 # PY3K COMPATIBLE
 
@@ -42,7 +43,7 @@ class Consistency(data_models.DataModel):
 
     @classmethod
     def dump(cls, subcommand, ddm_endpoint, storage_dump, prev_date_fname=None, next_date_fname=None,
-             prev_date=None, next_date=None, sort_rucio_replica_dumps=False, date=None,
+             prev_date=None, next_date=None, sort_rucio_replica_dumps=True, date=None,
              cache_dir=DUMPS_CACHE_DIR):
         logger = logging.getLogger('auditor.consistency')
         if subcommand == 'consistency':
@@ -134,7 +135,7 @@ class Consistency(data_models.DataModel):
             sd_prefix = 'ddmendpoint_{0}_unknown_date'.format(
                 ddm_endpoint,
             )
-            logger.warn(
+            logger.warning(
                 'Using basic and error prune naming for RSE dump as no date '
                 'information was provided, %s dump will be named %s',
                 ddm_endpoint,

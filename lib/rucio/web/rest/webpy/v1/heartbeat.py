@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # Copyright 2018 CERN for the benefit of the ATLAS collaboration.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,6 +17,8 @@
 # - Mario Lassnig <mario.lassnig@cern.ch>, 2014-2018
 # - Vincent Garonne <vincent.garonne@cern.ch>, 2017
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2019
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
+# - Thomas Beermann <thomas.beermann@cern.ch>, 2020
 #
 # PY3K COMPATIBLE
 
@@ -58,7 +60,7 @@ class Heartbeat(RucioController):
 
         header('Content-Type', 'application/json')
 
-        return json.dumps(list_heartbeats(issuer=ctx.env.get('issuer')),
+        return json.dumps(list_heartbeats(issuer=ctx.env.get('issuer'), vo=ctx.env.get('vo')),
                           cls=APIEncoder)
 
 
@@ -68,4 +70,5 @@ class Heartbeat(RucioController):
 
 APP = application(URLS, globals())
 APP.add_processor(loadhook(rucio_loadhook))
-application = APP.wsgifunc()
+if __name__ != "rucio.web.rest.heartbeat":
+    application = APP.wsgifunc()

@@ -1,5 +1,6 @@
-#!/usr/bin/env python
-# Copyright 2012-2018 CERN for the benefit of the ATLAS collaboration.
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Copyright 2018-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,65 +15,70 @@
 # limitations under the License.
 #
 # Authors:
-# - Vincent Garonne <vgaronne@gmail.com>, 2013-2017
-# - Mario Lassnig <mario.lassnig@cern.ch>, 2013-2019
-# - Ralph Vigne <ralph.vigne@cern.ch>, 2013
-# - Cedric Serfon <cedric.serfon@cern.ch>, 2014-2019
-# - Thomas Beermann <thomas.beermann@cern.ch>, 2014-2018
-# - Martin Barisits <martin.barisits@cern.ch>, 2018
+# - Thomas Beermann <thomas.beermann@cern.ch>, 2018-2020
+# - Martin Barisits <martin.barisits@cern.ch>, 2018-2020
+# - Mario Lassnig <mario.lassnig@cern.ch>, 2018-2020
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
+# - Cedric Serfon <cedric.serfon@cern.ch>, 2018-2019
+# - James Perry <j.perry@epcc.ed.ac.uk>, 2019-2020
+# - Ilija Vukotic <ivukotic@cern.ch>, 2020
 # - Luc Goossens <luc.goossens@cern.ch>, 2020
-#
-# PY3K COMPATIBLE
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
 from __future__ import print_function
+
 from datetime import datetime
 from json import dumps, loads
-from six import string_types
 from traceback import format_exc
+from xml.sax.saxutils import escape
+
+from six import string_types
+from web import application, ctx, Created, data, header, InternalError, loadhook, OK, unloadhook
+
+from rucio.api.replica import (add_replicas, list_replicas, list_dataset_replicas, list_dataset_replicas_bulk,
+                               delete_replicas, list_dataset_replicas_vp,
+                               get_did_from_pfns, update_replicas_states,
+                               declare_bad_file_replicas, add_bad_dids, add_bad_pfns, get_suspicious_files,
+                               declare_suspicious_file_replicas, list_bad_replicas_status,
+                               get_bad_replicas_summary, list_datasets_per_rse,
+                               set_tombstone)
+from rucio.common.config import config_get
+from rucio.common.constants import SUPPORTED_PROTOCOLS
+from rucio.common.exception import (AccessDenied, DataIdentifierAlreadyExists, InvalidType,
+                                    DataIdentifierNotFound, Duplicate, InvalidPath,
+                                    ResourceTemporaryUnavailable, RucioException,
+                                    RSENotFound, UnsupportedOperation, ReplicaNotFound,
+                                    InvalidObject, ScopeNotFound)
+from rucio.common.schema import insert_scope_name
+from rucio.common.utils import parse_response, APIEncoder, render_json_list
+from rucio.core.replica_sorter import sort_replicas
+from rucio.db.sqla.constants import BadFilesStatus, ReplicaState
+from rucio.web.rest.common import rucio_loadhook, rucio_unloadhook, RucioController, check_accept_header_wrapper
+from rucio.web.rest.utils import generate_http_error
+
 try:
     from urllib import unquote
     from urlparse import parse_qs
 except ImportError:
     from urllib.parse import unquote
     from urllib.parse import parse_qs
-from web import application, ctx, Created, data, header, InternalError, loadhook, OK, unloadhook
-from xml.sax.saxutils import escape
 
-from geoip2.errors import AddressNotFoundError
-
-from rucio.api.replica import (add_replicas, list_replicas, list_dataset_replicas,
-                               delete_replicas, list_dataset_replicas_vp,
-                               get_did_from_pfns, update_replicas_states,
-                               declare_bad_file_replicas, add_bad_pfns, get_suspicious_files,
-                               declare_suspicious_file_replicas, list_bad_replicas_status,
-                               get_bad_replicas_summary, list_datasets_per_rse,
-                               set_tombstone)
-from rucio.db.sqla.constants import BadFilesStatus
-from rucio.common.config import config_get
-from rucio.common.exception import (AccessDenied, DataIdentifierAlreadyExists, InvalidType,
-                                    DataIdentifierNotFound, Duplicate, InvalidPath,
-                                    ResourceTemporaryUnavailable, RucioException,
-                                    RSENotFound, UnsupportedOperation, ReplicaNotFound)
-from rucio.common.replica_sorter import sort_random, sort_geoip, sort_closeness, sort_dynamic, sort_ranking
-from rucio.common.schema import SCOPE_NAME_REGEXP
-from rucio.common.utils import generate_http_error, parse_response, APIEncoder, render_json_list
-from rucio.common.constants import SUPPORTED_PROTOCOLS
-from rucio.web.rest.common import rucio_loadhook, rucio_unloadhook, RucioController, check_accept_header_wrapper
-
-URLS = ('/list/?$', 'ListReplicas',
-        '/?$', 'Replicas',
-        '/suspicious/?$', 'SuspiciousReplicas',
-        '/bad/states/?$', 'BadReplicasStates',
-        '/bad/summary/?$', 'BadReplicasSummary',
-        '/bad/pfns/?$', 'BadPFNs',
-        '/rse/(.*)/?$', 'ReplicasRSE',
-        '/bad/?$', 'BadReplicas',
-        '/dids/?$', 'ReplicasDIDs',
-        '%s/datasets$' % SCOPE_NAME_REGEXP, 'DatasetReplicas',
-        '%s/datasets_vp$' % SCOPE_NAME_REGEXP, 'DatasetReplicasVP',
-        '%s/?$' % SCOPE_NAME_REGEXP, 'Replicas',
-        '/tombstone/?$', 'Tombstone')
+URLS = insert_scope_name(('/list/?$', 'ListReplicas',
+                          '/?$', 'Replicas',
+                          '/suspicious/?$', 'SuspiciousReplicas',
+                          '/bad/states/?$', 'BadReplicasStates',
+                          '/bad/summary/?$', 'BadReplicasSummary',
+                          '/bad/dids/?$', 'BadDIDs',
+                          '/bad/pfns/?$', 'BadPFNs',
+                          '/rse/(.*)/?$', 'ReplicasRSE',
+                          '/bad/?$', 'BadReplicas',
+                          '/dids/?$', 'ReplicasDIDs',
+                          '%s/datasets$', 'DatasetReplicas',
+                          '/datasets_bulk/?$', 'DatasetReplicasBulk',
+                          '%s/datasets_vp$', 'DatasetReplicasVP',
+                          '%s/?$', 'Replicas',
+                          '/tombstone/?$', 'Tombstone'))
 
 
 class Replicas(RucioController):
@@ -110,6 +116,14 @@ class Replicas(RucioController):
             if 'limit' in params:
                 limit = int(params['limit'][0])
 
+        client_ip = ctx.env.get('HTTP_X_FORWARDED_FOR')
+        if client_ip is None:
+            client_ip = ctx.ip
+
+        client_location = {'ip': client_ip,
+                           'fqdn': None,
+                           'site': None}
+
         # Resolve all reasonable protocols when doing metalink for maximum access possibilities
         if metalink and schemes is None:
             schemes = SUPPORTED_PROTOCOLS
@@ -120,35 +134,26 @@ class Replicas(RucioController):
             # otherwise the exceptions won't be propagated correctly
             __first = True
 
-            # then, stream the replica information
-            for rfile in list_replicas(dids=dids, schemes=schemes):
+            header('Content-Type', 'application/metalink4+xml' if metalink else 'application/x-json-stream')
+
+            for rfile in list_replicas(dids=dids, schemes=schemes, vo=ctx.env.get('vo')):
 
                 # in first round, set the appropriate content type, and stream the header
                 if __first:
-                    if not metalink:
-                        header('Content-Type', 'application/x-json-stream')
-                    else:
-                        header('Content-Type', 'application/metalink4+xml')
+                    if metalink:
                         yield '<?xml version="1.0" encoding="UTF-8"?>\n<metalink xmlns="urn:ietf:params:xml:ns:metalink">\n'
                     __first = False
 
-                client_ip = ctx.env.get('HTTP_X_FORWARDED_FOR')
-                if client_ip is None:
-                    client_ip = ctx.ip
-
+                # ... then, stream the replica information
                 replicas = []
                 dictreplica = {}
                 for rse in rfile['rses']:
                     for replica in rfile['rses'][rse]:
                         replicas.append(replica)
                         dictreplica[replica] = rse
-                if select == 'geoip':
-                    try:
-                        replicas = sort_geoip(dictreplica, client_ip)
-                    except AddressNotFoundError:
-                        pass
-                else:
-                    replicas = sort_random(dictreplica)
+
+                replicas = sort_replicas(dictreplica, client_location, selection=select)
+
                 if not metalink:
                     yield dumps(rfile) + '\n'
                 else:
@@ -173,11 +178,13 @@ class Replicas(RucioController):
                             break
                     yield ' </file>\n'
 
-            # ensure complete metalink
-            if __first and metalink:
-                yield '<?xml version="1.0" encoding="UTF-8"?>\n<metalink xmlns="urn:ietf:params:xml:ns:metalink">\n'
             if metalink:
-                yield '</metalink>\n'
+                if __first:
+                    # ensure complete metalink on success without any content
+                    yield '<?xml version="1.0" encoding="UTF-8"?>\n<metalink xmlns="urn:ietf:params:xml:ns:metalink">\n</metalink>\n'
+                else:
+                    # if metalink start was already sent, always send the end
+                    yield '</metalink>\n'
 
         except DataIdentifierNotFound as error:
             raise generate_http_error(404, 'DataIdentifierNotFound', error.args[0])
@@ -206,8 +213,9 @@ class Replicas(RucioController):
             raise generate_http_error(400, 'ValueError', 'Cannot decode json parameter list')
 
         try:
-            add_replicas(rse=parameters['rse'], files=parameters['files'], issuer=ctx.env.get(
-                'issuer'), ignore_availability=parameters.get('ignore_availability', False))
+            add_replicas(rse=parameters['rse'], files=parameters['files'],
+                         issuer=ctx.env.get('issuer'), vo=ctx.env.get('vo'),
+                         ignore_availability=parameters.get('ignore_availability', False))
         except InvalidPath as error:
             raise generate_http_error(400, 'InvalidPath', error.args[0])
         except AccessDenied as error:
@@ -218,6 +226,8 @@ class Replicas(RucioController):
             raise generate_http_error(409, 'DataIdentifierAlreadyExists', error.args[0])
         except RSENotFound as error:
             raise generate_http_error(404, 'RSENotFound', error.args[0])
+        except ScopeNotFound as error:
+            raise generate_http_error(404, 'ScopeNotFound', error.args[0])
         except ResourceTemporaryUnavailable as error:
             raise generate_http_error(503, 'ResourceTemporaryUnavailable', error.args[0])
         except RucioException as error:
@@ -245,7 +255,7 @@ class Replicas(RucioController):
             raise generate_http_error(400, 'ValueError', 'Cannot decode json parameter list')
 
         try:
-            update_replicas_states(rse=parameters['rse'], files=parameters['files'], issuer=ctx.env.get('issuer'))
+            update_replicas_states(rse=parameters['rse'], files=parameters['files'], issuer=ctx.env.get('issuer'), vo=ctx.env.get('vo'))
         except AccessDenied as error:
             raise generate_http_error(401, 'AccessDenied', error.args[0])
         except UnsupportedOperation as error:
@@ -276,8 +286,9 @@ class Replicas(RucioController):
             raise generate_http_error(400, 'ValueError', 'Cannot decode json parameter list')
 
         try:
-            delete_replicas(rse=parameters['rse'], files=parameters['files'], issuer=ctx.env.get(
-                'issuer'), ignore_availability=parameters.get('ignore_availability', False))
+            delete_replicas(rse=parameters['rse'], files=parameters['files'],
+                            issuer=ctx.env.get('issuer'), vo=ctx.env.get('vo'),
+                            ignore_availability=parameters.get('ignore_availability', False))
         except AccessDenied as error:
             raise generate_http_error(401, 'AccessDenied', error.args[0])
         except RSENotFound as error:
@@ -326,7 +337,10 @@ class ListReplicas(RucioController):
         ignore_availability, rse_expression, all_states, domain = False, None, False, None
         signature_lifetime, resolve_archives, resolve_parents = None, True, False
         updated_after = None
-        client_location = {}
+
+        client_location = {'ip': client_ip,
+                           'fqdn': None,
+                           'site': None}
 
         json_data = data()
         try:
@@ -343,8 +357,7 @@ class ListReplicas(RucioController):
             if 'rse_expression' in params:
                 rse_expression = params['rse_expression']
             if 'client_location' in params:
-                client_location = params['client_location']
-                client_location['ip'] = params['client_location'].get('ip', client_ip)
+                client_location.update(params['client_location'])
             if 'sort' in params:
                 select = params['sort']
             if 'domain' in params:
@@ -390,7 +403,8 @@ class ListReplicas(RucioController):
             # otherwise the exceptions won't be propagated correctly
             __first = True
 
-            # then, stream the replica information
+            header('Content-Type', 'application/metalink4+xml' if metalink else 'application/x-json-stream')
+
             for rfile in list_replicas(dids=dids, schemes=schemes,
                                        unavailable=unavailable,
                                        request_id=ctx.env.get('request_id'),
@@ -402,17 +416,16 @@ class ListReplicas(RucioController):
                                        resolve_archives=resolve_archives,
                                        resolve_parents=resolve_parents,
                                        updated_after=updated_after,
-                                       issuer=ctx.env.get('issuer')):
+                                       issuer=ctx.env.get('issuer'),
+                                       vo=ctx.env.get('vo')):
 
                 # in first round, set the appropriate content type, and stream the header
                 if __first:
-                    if not metalink:
-                        header('Content-Type', 'application/x-json-stream')
-                    else:
-                        header('Content-Type', 'application/metalink4+xml')
+                    if metalink:
                         yield '<?xml version="1.0" encoding="UTF-8"?>\n<metalink xmlns="urn:ietf:params:xml:ns:metalink">\n'
                     __first = False
 
+                # ... then, stream the replica information
                 if not metalink:
                     yield dumps(rfile, cls=APIEncoder) + '\n'
                 else:
@@ -447,37 +460,28 @@ class ListReplicas(RucioController):
                                                                         rfile['scope'],
                                                                         rfile['name'])
 
-                    # TODO: deprecate this
-                    if select == 'geoip':
-                        replicas = sort_geoip(dictreplica, client_location['ip'])
-                    elif select == 'closeness':
-                        replicas = sort_closeness(dictreplica, client_location)
-                    elif select == 'dynamic':
-                        replicas = sort_dynamic(dictreplica, client_location)
-                    elif select == 'ranking':
-                        replicas = sort_ranking(dictreplica, client_location)
-                    elif select == 'random':
-                        replicas = sort_random(dictreplica)
-                    else:
-                        replicas = sorted(dictreplica, key=dictreplica.get)
+                    lanreplicas = [replica for replica, v in dictreplica.items() if v[0] == 'lan']
+                    replicas = lanreplicas + sort_replicas({k: v for k, v in dictreplica.items() if v[0] != 'lan'}, client_location, selection=select)
 
-                    idx = 0
+                    idx = 1
                     for replica in replicas:
                         yield '  <url location="' + str(dictreplica[replica][2]) \
                             + '" domain="' + str(dictreplica[replica][0]) \
-                            + '" priority="' + str(dictreplica[replica][1]) \
+                            + '" priority="' + str(idx) \
                             + '" client_extract="' + str(dictreplica[replica][3]).lower() \
                             + '">' + escape(replica) + '</url>\n'
-                        idx += 1
                         if limit and limit == idx:
                             break
+                        idx += 1
                     yield ' </file>\n'
 
-            # ensure complete metalink
-            if __first and metalink:
-                yield '<?xml version="1.0" encoding="UTF-8"?>\n<metalink xmlns="urn:ietf:params:xml:ns:metalink">\n'
             if metalink:
-                yield '</metalink>\n'
+                if __first:
+                    # ensure complete metalink on success without any content
+                    yield '<?xml version="1.0" encoding="UTF-8"?>\n<metalink xmlns="urn:ietf:params:xml:ns:metalink">\n</metalink>\n'
+                else:
+                    # if metalink start was already sent, always send the end
+                    yield '</metalink>\n'
 
         except DataIdentifierNotFound as error:
             raise generate_http_error(404, 'DataIdentifierNotFound', error.args[0])
@@ -519,7 +523,7 @@ class ReplicasDIDs(RucioController):
             raise generate_http_error(400, 'ValueError', 'Cannot decode json parameter list')
 
         try:
-            for pfn in get_did_from_pfns(pfns, rse):
+            for pfn in get_did_from_pfns(pfns, rse, vo=ctx.env.get('vo')):
                 yield dumps(pfn) + '\n'
         except AccessDenied as error:
             raise generate_http_error(401, 'AccessDenied', error.args[0])
@@ -561,9 +565,11 @@ class BadReplicas(RucioController):
 
         not_declared_files = {}
         try:
-            not_declared_files = declare_bad_file_replicas(pfns=pfns, reason=reason, issuer=ctx.env.get('issuer'))
+            not_declared_files = declare_bad_file_replicas(pfns=pfns, reason=reason, issuer=ctx.env.get('issuer'), vo=ctx.env.get('vo'))
         except AccessDenied as error:
             raise generate_http_error(401, 'AccessDenied', error.args[0])
+        except RSENotFound as error:
+            raise generate_http_error(404, 'RSENotFound', error.args[0])
         except ReplicaNotFound as error:
             raise generate_http_error(404, 'ReplicaNotFound', error.args[0])
         except RucioException as error:
@@ -604,7 +610,7 @@ class SuspiciousReplicas(RucioController):
 
         not_declared_files = {}
         try:
-            not_declared_files = declare_suspicious_file_replicas(pfns=pfns, reason=reason, issuer=ctx.env.get('issuer'))
+            not_declared_files = declare_suspicious_file_replicas(pfns=pfns, reason=reason, issuer=ctx.env.get('issuer'), vo=ctx.env.get('vo'))
         except AccessDenied as error:
             raise generate_http_error(401, 'AccessDenied', error.args[0])
         except RucioException as error:
@@ -644,7 +650,7 @@ class SuspiciousReplicas(RucioController):
                 nattempts = int(params['nattempts'][0])
 
         try:
-            result = get_suspicious_files(rse_expression=rse_expression, younger_than=younger_than, nattempts=nattempts)
+            result = get_suspicious_files(rse_expression=rse_expression, younger_than=younger_than, nattempts=nattempts, vo=ctx.env.get('vo'))
         except RucioException as error:
             raise generate_http_error(500, error.__class__.__name__, error.args[0])
         except Exception as error:
@@ -679,13 +685,13 @@ class BadReplicasStates(RucioController):
             if 'state' in params:
                 state = params['state'][0]
             if isinstance(state, string_types):
-                state = BadFilesStatus.from_string(state)
+                state = BadFilesStatus(state)
             if 'rse' in params:
                 rse = params['rse'][0]
             if 'younger_than' in params:
-                younger_than = datetime.strptime(params['younger_than'], "%Y-%m-%dT%H:%M:%S.%f")
+                younger_than = datetime.strptime(params['younger_than'][0], "%Y-%m-%dT%H:%M:%S.%f")
             if 'older_than' in params and params['older_than']:
-                older_than = datetime.strptime(params['older_than'], "%Y-%m-%dT%H:%M:%S.%f")
+                older_than = datetime.strptime(params['older_than'][0], "%Y-%m-%dT%H:%M:%S.%f")
             if 'limit' in params:
                 limit = int(params['limit'][0])
             if 'list_pfns' in params:
@@ -693,7 +699,8 @@ class BadReplicasStates(RucioController):
 
         try:
             result = list_bad_replicas_status(state=state, rse=rse, younger_than=younger_than,
-                                              older_than=older_than, limit=limit, list_pfns=list_pfns)
+                                              older_than=older_than, limit=limit, list_pfns=list_pfns,
+                                              vo=ctx.env.get('vo'))
         except RucioException as error:
             raise generate_http_error(500, error.__class__.__name__, error.args[0])
         except Exception as error:
@@ -734,7 +741,7 @@ class BadReplicasSummary(RucioController):
                 to_date = datetime.strptime(params['to_date'][0], "%Y-%m-%d")
 
         try:
-            result = get_bad_replicas_summary(rse_expression=rse_expression, from_date=from_date, to_date=to_date)
+            result = get_bad_replicas_summary(rse_expression=rse_expression, from_date=from_date, to_date=to_date, vo=ctx.env.get('vo'))
         except RucioException as error:
             raise generate_http_error(500, error.__class__.__name__, error.args[0])
         except Exception as error:
@@ -749,7 +756,7 @@ class DatasetReplicas(RucioController):
     @check_accept_header_wrapper(['application/x-json-stream'])
     def GET(self, scope, name):
         """
-        List dataset replicas replicas.
+        List dataset replicas.
 
         HTTP Success:
             200 OK
@@ -771,8 +778,55 @@ class DatasetReplicas(RucioController):
             if 'deep' in params:
                 deep = params['deep'][0]
         try:
-            for row in list_dataset_replicas(scope=scope, name=name, deep=deep):
+            for row in list_dataset_replicas(scope=scope, name=name, deep=deep, vo=ctx.env.get('vo')):
                 yield dumps(row, cls=APIEncoder) + '\n'
+        except RucioException as error:
+            raise generate_http_error(500, error.__class__.__name__, error.args[0])
+        except Exception as error:
+            print(format_exc())
+            raise InternalError(error)
+
+
+class DatasetReplicasBulk(RucioController):
+
+    @check_accept_header_wrapper(['application/x-json-stream'])
+    def POST(self):
+        """
+        List dataset replicas for multiple DIDs.
+
+        HTTP Success:
+            200 OK
+
+        HTTP Error:
+            400 Bad Request
+            401 Unauthorized
+            406 Not Acceptable
+            500 InternalError
+
+        :returns: A dictionary containing all replicas information.
+        """
+        header('Content-Type', 'application/x-json-stream')
+        json_data = data()
+        try:
+            params = parse_response(json_data)
+            dids = params['dids']
+            didslength = len(dids)
+        except KeyError as error:
+            raise generate_http_error(400, 'KeyError', 'Cannot find mandatory parameter : %s' % str(error))
+        except ValueError:
+            raise generate_http_error(400, 'ValueError', 'Cannot decode json parameter list')
+        except RucioException as error:
+            raise generate_http_error(500, error.__class__.__name__, error.args[0])
+        except Exception as error:
+            print(format_exc())
+            raise InternalError(error)
+        if didslength == 0:
+            raise generate_http_error(400, 'ValueError', 'List of DIDs is empty')
+        try:
+            for row in list_dataset_replicas_bulk(dids=dids, vo=ctx.env.get('vo')):
+                yield dumps(row, cls=APIEncoder) + '\n'
+        except InvalidObject as error:
+            raise generate_http_error(400, 'InvalidObject', 'Cannot validate DIDs: %s' % (str(error)))
         except RucioException as error:
             raise generate_http_error(500, error.__class__.__name__, error.args[0])
         except Exception as error:
@@ -811,7 +865,7 @@ class DatasetReplicasVP(RucioController):
             if 'deep' in params:
                 deep = params['deep'][0]
         try:
-            for row in list_dataset_replicas_vp(scope=scope, name=name, deep=deep):
+            for row in list_dataset_replicas_vp(scope=scope, name=name, deep=deep, vo=ctx.env.get('vo')):
                 yield dumps(row, cls=APIEncoder) + '\n'
         except RucioException as error:
             raise generate_http_error(500, error.__class__.__name__, error.args[0])
@@ -839,13 +893,64 @@ class ReplicasRSE(RucioController):
         """
         header('Content-Type', 'application/x-json-stream')
         try:
-            for row in list_datasets_per_rse(rse=rse):
+            for row in list_datasets_per_rse(rse=rse, vo=ctx.env.get('vo')):
                 yield dumps(row, cls=APIEncoder) + '\n'
         except RucioException as error:
             raise generate_http_error(500, error.__class__.__name__, error.args[0])
         except Exception as error:
             print(format_exc())
             raise InternalError(error)
+
+
+class BadDIDs(RucioController):
+
+    def POST(self):
+        """
+        Declare a list of bad replicas by DID.
+
+        HTTP Success:
+            200 OK
+
+        HTTP Error:
+            400 BadRequest
+            401 Unauthorized
+            409 Conflict
+            500 InternalError
+
+        """
+        json_data = data()
+        dids = []
+        rse = None
+        reason = None
+        expires_at = None
+        header('Content-Type', 'application/x-json-stream')
+        try:
+            params = parse_response(json_data)
+            if 'dids' in params:
+                dids = params['dids']
+            if 'rse' in params:
+                rse = params['rse']
+            if 'reason' in params:
+                reason = params['reason']
+            state = ReplicaState.BAD
+            if 'expires_at' in params and params['expires_at']:
+                expires_at = datetime.strptime(params['expires_at'], "%Y-%m-%dT%H:%M:%S.%f")
+            not_declared_files = add_bad_dids(dids=dids, rse=rse, issuer=ctx.env.get('issuer'), state=state,
+                                              reason=reason, expires_at=expires_at, vo=ctx.env.get('vo'))
+        except (ValueError, InvalidType) as error:
+            raise generate_http_error(400, 'ValueError', error.args[0])
+        except AccessDenied as error:
+            raise generate_http_error(401, 'AccessDenied', error.args[0])
+        except ReplicaNotFound as error:
+            raise generate_http_error(404, 'ReplicaNotFound', error.args[0])
+        except Duplicate as error:
+            raise generate_http_error(409, 'Duplicate', error.args[0])
+        except RucioException as error:
+            raise generate_http_error(500, error.__class__.__name__, error.args[0])
+        except Exception as error:
+            print(format_exc())
+            raise InternalError(error)
+        raise Created(dumps(not_declared_files))
 
 
 class BadPFNs(RucioController):
@@ -880,7 +985,7 @@ class BadPFNs(RucioController):
                 state = params['state']
             if 'expires_at' in params and params['expires_at']:
                 expires_at = datetime.strptime(params['expires_at'], "%Y-%m-%dT%H:%M:%S.%f")
-            add_bad_pfns(pfns=pfns, issuer=ctx.env.get('issuer'), state=state, reason=reason, expires_at=expires_at)
+            add_bad_pfns(pfns=pfns, issuer=ctx.env.get('issuer'), state=state, reason=reason, expires_at=expires_at, vo=ctx.env.get('vo'))
         except (ValueError, InvalidType) as error:
             raise generate_http_error(400, 'ValueError', error.args[0])
         except AccessDenied as error:
@@ -922,7 +1027,7 @@ class Tombstone(RucioController):
 
         try:
             for replica in replicas:
-                set_tombstone(replica['rse'], replica['scope'], replica['name'], issuer=ctx.env.get('issuer'))
+                set_tombstone(replica['rse'], replica['scope'], replica['name'], issuer=ctx.env.get('issuer'), vo=ctx.env.get('vo'))
         except ReplicaNotFound as error:
             raise generate_http_error(404, 'ReplicaNotFound', error.args[0])
         except RucioException as error:
@@ -940,4 +1045,5 @@ class Tombstone(RucioController):
 APP = application(URLS, globals())
 APP.add_processor(loadhook(rucio_loadhook))
 APP.add_processor(unloadhook(rucio_unloadhook))
-application = APP.wsgifunc()
+if __name__ != "rucio.web.rest.replica":
+    application = APP.wsgifunc()

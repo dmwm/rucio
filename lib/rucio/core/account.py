@@ -1,4 +1,5 @@
-# Copyright 2012-2019 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2012-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,18 +16,20 @@
 # Authors:
 # - Thomas Beermann <thomas.beermann@cern.ch>, 2012
 # - Angelos Molfetas <Angelos.Molfetas@cern.ch>, 2012
-# - Mario Lassnig <mario.lassnig@cern.ch>, 2012-2019
-# - Vincent Garonne <vgaronne@gmail.com>, 2012-2015
+# - Mario Lassnig <mario.lassnig@cern.ch>, 2012-2020
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2012-2015
 # - Martin Barisits <martin.barisits@cern.ch>, 2014
 # - Cedric Serfon <cedric.serfon@cern.ch>, 2014-2019
-# - Joaquin Bogado <jbogado@linti.unlp.edu.ar>, 2015
+# - Joaquín Bogado <jbogado@linti.unlp.edu.ar>, 2015
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
 # - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
+# - Patrick Austin <patrick.austin@stfc.ac.uk>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 #
 # PY3K COMPATIBLE
 
-
 from datetime import datetime
+from enum import Enum
 from re import match
 from traceback import format_exc
 
@@ -38,9 +41,10 @@ import rucio.core.account_counter
 import rucio.core.rse
 
 from rucio.common import exception
+from rucio.common.config import config_get_bool
+from rucio.core.vo import vo_exists
 from rucio.db.sqla import models
 from rucio.db.sqla.constants import AccountStatus, AccountType
-from rucio.db.sqla.enum import EnumSymbol
 from rucio.db.sqla.session import read_session, transactional_session, stream_session
 
 from six import string_types
@@ -55,6 +59,15 @@ def add_account(account, type, email, session=None):
     :param email: The Email address associated with the account.
     :param session: the database session in use.
     """
+    vo = account.vo
+    if not vo_exists(vo=vo, session=session):
+        raise exception.VONotFound('VO {} not found'.format(vo))
+
+    # Reserve the name 'super_root' for multi_vo admins
+    if account.external == 'super_root':
+        if not (vo == 'def' and config_get_bool('common', 'multi_vo', raise_exception=False, default=False)):
+            raise exception.UnsupportedAccountName('The name "%s" cannot be used.' % account.external)
+
     new_account = models.Account(account=account, account_type=type, email=email,
                                  status=AccountStatus.ACTIVE)
     try:
@@ -130,7 +143,7 @@ def update_account(account, key, value, session=None):
         raise exception.AccountNotFound('Account with ID \'%s\' cannot be found' % account)
     if key == 'status':
         if isinstance(value, string_types):
-            value = AccountStatus.from_sym(value)
+            value = AccountStatus[value]
         if value == AccountStatus.SUSPENDED:
             query.update({'status': value, 'suspended_at': datetime.utcnow()})
         elif value == AccountStatus.ACTIVE:
@@ -153,14 +166,20 @@ def list_accounts(filter={}, session=None):
     for filter_type in filter:
         if filter_type == 'account_type':
             if isinstance(filter['account_type'], string_types):
-                query = query.filter_by(account_type=AccountType.from_sym(filter['account_type']))
-            elif isinstance(filter['account_type'], EnumSymbol):
+                query = query.filter_by(account_type=AccountType[filter['account_type']])
+            elif isinstance(filter['account_type'], Enum):
                 query = query.filter_by(account_type=filter['account_type'])
 
         elif filter_type == 'identity':
             query = query.join(models.IdentityAccountAssociation, models.Account.account == models.IdentityAccountAssociation.account).\
                 filter(models.IdentityAccountAssociation.identity == filter['identity'])
 
+        elif filter_type == 'account':
+            if '*' in filter['account'].internal:
+                account_str = filter['account'].internal.replace('*', '%')
+                query = query.filter(models.Account.account.like(account_str))
+            else:
+                query = query.filter_by(account=filter['account'])
         else:
             query = query.join(models.AccountAttrAssociation, models.Account.account == models.AccountAttrAssociation.account).\
                 filter(models.AccountAttrAssociation.key == filter_type).\
@@ -261,7 +280,7 @@ def add_account_attribute(account, key, value, session=None):
         if match('.*IntegrityError.*ORA-00001: unique constraint.*ACCOUNT_ATTR_MAP_PK.*violated.*', error.args[0]) \
            or match('.*IntegrityError.*1062.*Duplicate entry.*for key.*', error.args[0]) \
            or match('.*IntegrityError.*UNIQUE constraint failed: account_attr_map.account, account_attr_map.key.*', error.args[0]) \
-           or error.args[0] == "(IntegrityError) column account/key is not unique" \
+           or match('.*IntegrityError.*columns? account.*key.*not unique.*', error.args[0]) \
            or match('.*IntegrityError.*duplicate key value violates unique constraint.*', error.args[0]) \
            or match('.*UniqueViolation.*duplicate key value violates unique constraint.*', error.args[0]):
             raise exception.Duplicate('Key {0} already exist for account {1}!'.format(key, account))

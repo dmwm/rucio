@@ -1,4 +1,5 @@
-# Copyright 2013-2018 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2013-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,15 +14,17 @@
 # limitations under the License.
 #
 # Authors:
-# - Mario Lassnig <mario.lassnig@cern.ch>, 2013-2015
+# - Mario Lassnig <mario.lassnig@cern.ch>, 2013-2020
 # - Cedric Serfon <cedric.serfon@cern.ch>, 2013-2018
-# - Vincent Garonne <vgaronne@gmail.com>, 2014-2018
-# - Wen Guan <wguan.icedew@gmail.com>, 2014-2016
-# - Martin Barisits <martin.barisits@cern.ch>, 2016-2017
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2014-2018
+# - Wen Guan <wen.guan@cern.ch>, 2014-2016
+# - Martin Barisits <martin.barisits@cern.ch>, 2016-2020
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018
-# - Brandon White <bjwhite@fnal.gov>, 2019-2020
-#
-# PY3K COMPATIBLE
+# - maatthias <maatthias@gmail.com>, 2019
+# - Brandon White <bjwhite@fnal.gov>, 2019
+# - Nick Smith <nick.smith@cern.ch>, 2020
+# - Thomas Beermann <thomas.beermann@cern.ch>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
 """
 Conveyor is a daemon to manage file transfers.
@@ -39,21 +42,23 @@ import sys
 import threading
 import time
 import traceback
-
 from collections import defaultdict
-try:
-    from ConfigParser import NoOptionError  # py2
-except Exception:
-    from configparser import NoOptionError  # py3
+
 from requests.exceptions import RequestException
 from sqlalchemy.exc import DatabaseError
 
+import rucio.db.sqla.util
 from rucio.common.config import config_get
 from rucio.common.exception import DatabaseException, TransferToolTimeout, TransferToolWrongAnswer
 from rucio.common.utils import chunks
 from rucio.core import heartbeat, transfer as transfer_core, request as request_core
 from rucio.core.monitor import record_timer, record_counter
 from rucio.db.sqla.constants import RequestState, RequestType
+
+try:
+    from ConfigParser import NoOptionError  # py2
+except Exception:
+    from configparser import NoOptionError  # py3
 
 
 logging.basicConfig(stream=sys.stdout,
@@ -82,7 +87,7 @@ def poller(once=False, activities=None, sleep_time=60,
     except NoOptionError:
         timeout = None
 
-    executable = sys.argv[0]
+    executable = 'conveyor-poller'
     if activities:
         activities.sort()
         executable += '--activities ' + str(activities)
@@ -178,6 +183,8 @@ def run(once=False, sleep_time=60, activities=None,
     """
     Starts up the conveyer threads.
     """
+    if rucio.db.sqla.util.is_old_db():
+        raise DatabaseException('Database was not updated, daemon won\'t start')
 
     if activity_shares:
 
@@ -233,6 +240,12 @@ def poll_transfers(external_host, xfers, prepend_str='', request_ids=None, timeo
     :param timeout:          Timeout.
     """
     try:
+        if TRANSFER_TOOL == 'mock':
+            logging.debug(prepend_str + 'Setting %s transfer requests status to DONE per mock tool' % (len(xfers)))
+            for task_id in xfers:
+                ret = transfer_core.update_transfer_state(external_host=None, transfer_id=task_id, state=RequestState.DONE)
+                record_counter('daemons.conveyor.poller.update_request_state.%s' % ret)
+            return
         try:
             tss = time.time()
             logging.info(prepend_str + 'Polling %i transfers against %s with timeout %s' % (len(xfers), external_host, timeout))
@@ -248,7 +261,6 @@ def poll_transfers(external_host, xfers, prepend_str='', request_ids=None, timeo
                 try:
                     logging.debug(prepend_str + 'Checking %s on %s' % (xfer, external_host))
                     status = transfer_core.bulk_query_transfers(external_host, [xfer, ], TRANSFER_TOOL, timeout)
-                    logging.debug(prepend_str + str(status))
                     if xfer in status and isinstance(status[xfer], Exception):
                         logging.error(prepend_str + 'Problem querying %s on %s . Error returned : %s' % (xfer, external_host, str(status[xfer])))
                 except Exception as err:
@@ -299,7 +311,7 @@ def poll_transfers(external_host, xfers, prepend_str='', request_ids=None, timeo
                     transfer_core.touch_transfer(external_host, transfer_id)
                 except (DatabaseException, DatabaseError) as error:
                     if re.match('.*ORA-00054.*', error.args[0]) or re.match('.*ORA-00060.*', error.args[0]) or 'ERROR 1205 (HY000)' in error.args[0]:
-                        logging.warn(prepend_str + "Lock detected when handling request %s - skipping" % request_id)
+                        logging.warning(prepend_str + "Lock detected when handling request %s - skipping" % request_id)
                     else:
                         logging.error(traceback.format_exc())
             logging.debug(prepend_str + 'Finished updating %s transfer requests status (%i requests state changed) in %s seconds' % (len(xfers), cnt, (time.time() - tss)))

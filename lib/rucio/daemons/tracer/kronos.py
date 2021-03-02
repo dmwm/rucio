@@ -1,4 +1,5 @@
-# Copyright 2014-2018 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2014-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,16 +14,17 @@
 # limitations under the License.
 #
 # Authors:
-# - Thomas Beermann <thomas.beermann@cern.ch>, 2014-2018
+# - Thomas Beermann <thomas.beermann@cern.ch>, 2014-2020
 # - Ralph Vigne <ralph.vigne@cern.ch>, 2014
-# - Vincent Garonne <vgaronne@gmail.com>, 2015-2018
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2015-2018
 # - Mario Lassnig <mario.lassnig@cern.ch>, 2015
-# - Wen Guan <wguan.icedew@gmail.com>, 2015
-# - Cedric Serfon <cedric.serfon@cern,ch>, 2018
+# - Wen Guan <wen.guan@cern.ch>, 2015
+# - Cedric Serfon <cedric.serfon@cern.ch>, 2018
 # - Robert Illingworth <illingwo@fnal.gov>, 2018
+# - Martin Barisits <martin.barisits@cern.ch>, 2018
 # - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
-#
-# PY3K COMPATIBLE
+# - Eli Chadwick <eli.chadwick@stfc.ac.uk>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
 """
 This daemon consumes tracer messages from ActiveMQ and updates the atime for replicas.
@@ -31,14 +33,9 @@ This daemon consumes tracer messages from ActiveMQ and updates the atime for rep
 import logging
 import re
 import socket
-
 from datetime import datetime
 from json import loads as jloads, dumps as jdumps
 from os import getpid
-try:
-    from Queue import Queue  # py2
-except ImportError:
-    from queue import Queue  # py3
 from sys import stdout
 from threading import Event, Thread, current_thread
 from time import sleep, time
@@ -46,17 +43,24 @@ from traceback import format_exc
 
 from stomp import Connection
 
+import rucio.db.sqla.util
 from rucio.common.config import config_get, config_get_bool, config_get_int
-from rucio.common.exception import ConfigNotFound
+from rucio.common.exception import ConfigNotFound, RSENotFound, DatabaseException
 from rucio.common.types import InternalAccount, InternalScope
-from rucio.core.monitor import record_counter, record_timer
 from rucio.core.config import get
 from rucio.core.did import touch_dids, list_parent_dids
 from rucio.core.heartbeat import live, die, sanity_check
 from rucio.core.lock import touch_dataset_locks
+from rucio.core.monitor import record_counter, record_timer
 from rucio.core.replica import touch_replica, touch_collection_replicas, declare_bad_file_replicas
 from rucio.core.rse import get_rse_id
 from rucio.db.sqla.constants import DIDType, BadFilesStatus
+
+try:
+    from Queue import Queue  # py2
+except ImportError:
+    from queue import Queue  # py3
+
 
 logging.getLogger("stomp").setLevel(logging.CRITICAL)
 
@@ -139,6 +143,9 @@ class AMQConsumer(object):
         replicas = []
         rses = []
         for report in self.__reports:
+            if 'vo' not in report:
+                report['vo'] = 'def'
+
             try:
                 # Identify suspicious files
                 try:
@@ -151,7 +158,7 @@ class AMQConsumer(object):
                                 else:
                                     try:
                                         surl = report['url']
-                                        declare_bad_file_replicas([surl, ], reason=reason, issuer=InternalAccount('root'), status=BadFilesStatus.SUSPICIOUS)
+                                        declare_bad_file_replicas([surl, ], reason=reason, issuer=InternalAccount('root', vo=report['vo']), status=BadFilesStatus.SUSPICIOUS)
                                         logging.info('Declare suspicious file %s with reason %s' % (report['url'], reason))
                                     except Exception as error:
                                         logging.error('Failed to declare suspicious file' + str(error))
@@ -165,7 +172,7 @@ class AMQConsumer(object):
                         continue
                 else:
                     record_counter('daemons.tracer.kronos.with_scope')
-                    report['scope'] = InternalScope(report['scope'])
+                    report['scope'] = InternalScope(report['scope'], report['vo'])
 
                 # handle all events starting with get* and download and touch events.
                 if not report['eventType'].startswith('get') and not report['eventType'].startswith('sm_get') and not report['eventType'] == 'download' and not report['eventType'] == 'touch':
@@ -217,7 +224,12 @@ class AMQConsumer(object):
 
                     rses = report['remoteSite'].strip().split(',')
                     for rse in rses:
-                        rse_id = get_rse_id(rse=rse)
+                        try:
+                            rse_id = get_rse_id(rse=rse, vo=report['vo'])
+                        except RSENotFound:
+                            logging.error(format_exc())
+                            record_counter('daemons.tracer.kronos.rse_not_found')
+                            continue
                         replicas.append({'name': report['filename'], 'scope': report['scope'], 'rse': rse, 'rse_id': rse_id, 'accessed_at': datetime.utcfromtimestamp(report['traceTimeentryUnix']),
                                          'traceTimeentryUnix': report['traceTimeentryUnix'], 'eventVersion': report['eventVersion']})
                 else:
@@ -228,14 +240,25 @@ class AMQConsumer(object):
                     rse = None
                     if 'remoteSite' in report:
                         rse = report['remoteSite']
-                        rse_id = get_rse_id(rse=rse)
+                        try:
+                            rse_id = get_rse_id(rse=rse, vo=report['vo'])
+                        except RSENotFound:
+                            logging.error(format_exc())
+                            record_counter('daemons.tracer.kronos.rse_not_found')
                     if 'datasetScope' in report:
-                        self.__dataset_queue.put({'scope': report['datasetScope'], 'name': report['dataset'], 'rse_id': rse_id, 'accessed_at': datetime.utcfromtimestamp(report['traceTimeentryUnix'])})
+                        self.__dataset_queue.put({'scope': InternalScope(report['datasetScope'], vo=report['vo']),
+                                                  'name': report['dataset'],
+                                                  'rse_id': rse_id,
+                                                  'accessed_at': datetime.utcfromtimestamp(report['traceTimeentryUnix'])})
                         continue
                     else:
                         if 'remoteSite' not in report:
                             continue
-                        replicas.append({'name': report['filename'], 'scope': report['scope'], 'rse': rse, 'rse_id': rse_id, 'accessed_at': datetime.utcfromtimestamp(report['traceTimeentryUnix'])})
+                        replicas.append({'name': report['filename'],
+                                         'scope': report['scope'],
+                                         'rse': rse,
+                                         'rse_id': rse_id,
+                                         'accessed_at': datetime.utcfromtimestamp(report['traceTimeentryUnix'])})
 
             except (KeyError, AttributeError):
                 logging.error(format_exc())
@@ -249,7 +272,12 @@ class AMQConsumer(object):
                 if did['scope'].external == 'panda' and '_dis' in did['name']:
                     continue
                 for rse in rses:
-                    rse_id = get_rse_id(rse=rse)
+                    try:
+                        rse_id = get_rse_id(rse=rse, vo=report['vo'])
+                    except RSENotFound:
+                        logging.error(format_exc())
+                        record_counter('daemons.tracer.kronos.rse_not_found')
+                        continue
                     self.__dataset_queue.put({'scope': did['scope'], 'name': did['name'], 'did_type': did['type'], 'rse_id': rse_id, 'accessed_at': datetime.utcfromtimestamp(report['traceTimeentryUnix'])})
 
         logging.debug(replicas)
@@ -259,8 +287,16 @@ class AMQConsumer(object):
             for replica in replicas:
                 # if touch replica hits a locked row put the trace back into queue for later retry
                 if not touch_replica(replica):
-                    resubmit = {'filename': replica['name'], 'scope': replica['scope'].external, 'remoteSite': replica['rse'], 'traceTimeentryUnix': replica['traceTimeentryUnix'],
-                                'eventType': 'get', 'usrdn': 'someuser', 'clientState': 'DONE', 'eventVersion': replica['eventVersion']}
+                    resubmit = {'filename': replica['name'],
+                                'scope': replica['scope'].external,
+                                'remoteSite': replica['rse'],
+                                'traceTimeentryUnix': replica['traceTimeentryUnix'],
+                                'eventType': 'get',
+                                'usrdn': 'someuser',
+                                'clientState': 'DONE',
+                                'eventVersion': replica['eventVersion']}
+                    if replica['scope'].vo != 'def':
+                        resubmit['vo'] = replica['scope'].vo
                     self.__conn.send(body=jdumps(resubmit), destination=self.__queue, headers={'appversion': 'rucio', 'resubmitted': '1'})
                     record_counter('daemons.tracer.kronos.sent_resubmitted')
                     logging.warning('(kronos_file) hit locked row, resubmitted to queue')
@@ -279,6 +315,7 @@ def kronos_file(once=False, thread=0, brokers_resolved=None, dataset_queue=None,
 
     logging.info('tracer consumer starting')
 
+    executable = 'kronos-file'
     hostname = socket.gethostname()
     pid = getpid()
     thread = current_thread()
@@ -329,10 +366,10 @@ def kronos_file(once=False, thread=0, brokers_resolved=None, dataset_queue=None,
 
     logging.info('(kronos_file) tracer consumer started')
 
-    sanity_check(executable='kronos-file', hostname=hostname)
+    sanity_check(executable=executable, hostname=hostname)
     while not graceful_stop.is_set():
         start_time = time()
-        live(executable='kronos-file', hostname=hostname, pid=pid, thread=thread)
+        live(executable=executable, hostname=hostname, pid=pid, thread=thread)
         for conn in conns:
             if not conn.is_connected():
                 logging.info('(kronos_file) connecting to %s' % conn.transport._Transport__host_and_ports[0][0])
@@ -364,23 +401,24 @@ def kronos_file(once=False, thread=0, brokers_resolved=None, dataset_queue=None,
         except Exception:
             pass
 
-    die(executable='kronos-file', hostname=hostname, pid=pid, thread=thread)
+    die(executable=executable, hostname=hostname, pid=pid, thread=thread)
     logging.info('(kronos_file) graceful stop done')
 
 
 def kronos_dataset(once=False, thread=0, dataset_queue=None, sleep_time=60):
     logging.info('(kronos_dataset) starting')
 
+    executable = 'kronos-dataset'
     hostname = socket.gethostname()
     pid = getpid()
     thread = current_thread()
 
     dataset_wait = config_get_int('tracer-kronos', 'dataset_wait')
     start = datetime.now()
-    sanity_check(executable='kronos-dataset', hostname=hostname)
+    sanity_check(executable=executable, hostname=hostname)
     while not graceful_stop.is_set():
         start_time = time()
-        live(executable='kronos-dataset', hostname=hostname, pid=pid, thread=thread)
+        live(executable=executable, hostname=hostname, pid=pid, thread=thread)
         if (datetime.now() - start).seconds > dataset_wait:
             __update_datasets(dataset_queue)
             start = datetime.now()
@@ -389,7 +427,7 @@ def kronos_dataset(once=False, thread=0, dataset_queue=None, sleep_time=60):
             logging.info('(kronos_dataset) Will sleep for %s seconds' % (sleep_time - tottime))
             sleep(sleep_time - tottime)
     # once again for the backlog
-    die(executable='kronos-dataset', hostname=hostname, pid=pid, thread=thread)
+    die(executable=executable, hostname=hostname, pid=pid, thread=thread)
     logging.info('(kronos_dataset) cleaning dataset backlog before shutdown...')
     __update_datasets(dataset_queue)
 
@@ -469,6 +507,9 @@ def run(once=False, threads=1, sleep_time_datasets=60, sleep_time_files=60):
     """
     Starts up the consumer threads
     """
+    if rucio.db.sqla.util.is_old_db():
+        raise DatabaseException('Database was not updated, daemon won\'t start')
+
     logging.info('resolving brokers')
 
     brokers_alias = []

@@ -1,26 +1,37 @@
-"""
- Copyright European Organization for Nuclear Research (CERN)
+# -*- coding: utf-8 -*-
+# Copyright 2015-2020 CERN
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Authors:
+# - Wen Guan <wen.guan@cern.ch>, 2015-2016
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2015-2017
+# - Cedric Serfon <cedric.serfon@cern.ch>, 2017
+# - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
- Licensed under the Apache License, Version 2.0 (the "License");
- You may not use this file except in compliance with the License.
- You may obtain a copy of the License at
- http://www.apache.org/licenses/LICENSE-2.0
-
- Authors:
- - Wen Guan, <wen.guan@cern.ch>, 2015-2016
- - Cedric Serfon, <cedric.serfon@cern.ch>, 2017
- - Andrew Lister, <andrew.lister@stfc.ac.uk>, 2019
-
- PY3K COMPATIBLE
-"""
+from typing import TYPE_CHECKING
 
 from sqlalchemy.exc import DatabaseError, IntegrityError
 from sqlalchemy.orm import aliased
 
 from rucio.common import exception
-from rucio.core.rse import get_rse_name
 from rucio.db.sqla.models import Distance, RSE
 from rucio.db.sqla.session import transactional_session, read_session
+
+if TYPE_CHECKING:
+    from typing import List, Dict
 
 
 @transactional_session
@@ -47,7 +58,7 @@ def add_distance(src_rse_id, dest_rse_id, ranking=None, agis_distance=None, geoi
                                 active=active, submitted=submitted, finished=finished, failed=failed, transfer_speed=transfer_speed)
         new_distance.save(session=session)
     except IntegrityError:
-        raise exception.Duplicate('Distance from %s to %s already exists!' % (get_rse_name(rse_id=src_rse_id, session=session), get_rse_name(rse_id=dest_rse_id, session=session)))
+        raise exception.Duplicate()
     except DatabaseError as error:
         raise exception.RucioException(error.args)
 
@@ -69,7 +80,7 @@ def add_distance_short(src_rse_id, dest_rse_id, distance=None, session=None):
 
 
 @read_session
-def get_distances(src_rse_id=None, dest_rse_id=None, session=None):
+def get_distances(src_rse_id=None, dest_rse_id=None, session=None) -> "List[Dict]":
     """
     Get distances between rses.
 
@@ -160,9 +171,10 @@ def list_distances(filter={}, session=None):
 
 
 @read_session
-def export_distances(session=None):
+def export_distances(vo='def', session=None):
     """
     Export distances between all the RSEs using RSE ids.
+    :param vo: The VO to export.
     :param session: The database session to use.
     :returns distance: dictionary of dictionaries with all the distances.
     """
@@ -173,7 +185,9 @@ def export_distances(session=None):
         rse_dest = aliased(RSE)
         query = session.query(Distance, rse_src.id, rse_dest.id)\
                        .join(rse_src, rse_src.id == Distance.src_rse_id)\
-                       .join(rse_dest, rse_dest.id == Distance.dest_rse_id)
+                       .join(rse_dest, rse_dest.id == Distance.dest_rse_id)\
+                       .filter(rse_src.vo == vo)\
+                       .filter(rse_dest.vo == vo)
         for result in query.all():
             distance = result[0]
             src_id = result[1]

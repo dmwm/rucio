@@ -1,4 +1,5 @@
-# Copyright 2012-2019 CERN for the benefit of the ATLAS collaboration.
+# -*- coding: utf-8 -*-
+# Copyright 2012-2021 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,47 +14,64 @@
 # limitations under the License.
 #
 # Authors:
-# - Vincent Garonne <vgaronne@gmail.com>, 2012-2018
+# - Vincent Garonne <vincent.garonne@cern.ch>, 2012-2018
 # - Thomas Beermann <thomas.beermann@cern.ch>, 2012-2018
-# - Mario Lassnig <mario.lassnig@cern.ch>, 2012-2019
-# - Cedric Serfon <cedric.serfon@cern.ch>, 2013-2017
+# - Mario Lassnig <mario.lassnig@cern.ch>, 2012-2020
+# - Cedric Serfon <cedric.serfon@cern.ch>, 2013-2021
 # - Ralph Vigne <ralph.vigne@cern.ch>, 2013
-# - Joaquin Bogado <jbogado@linti.unlp.edu.ar>, 2015-2018
-# - Martin Barisits <martin.barisits@cern.ch>, 2016-2019
-# - Frank Berghaus, <frank.berghaus@cern.ch>, 2017
+# - Joaquín Bogado <jbogado@linti.unlp.edu.ar>, 2015-2018
+# - Martin Barisits <martin.barisits@cern.ch>, 2016-2020
 # - Brian Bockelman <bbockelm@cse.unl.edu>, 2018
-# - Tobias Wegner <twegner@cern.ch>, 2018
+# - Tobias Wegner <twegner@cern.ch>, 2018-2019
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018-2019
-# - Andrew Lister, <andrew.lister@stfc.ac.uk>, 2019
+# - Tomas Javurek <tomas.javurek@cern.ch>, 2019-2020
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
+# - James Perry <j.perry@epcc.ed.ac.uk>, 2019
 # - Gabriele Fronze' <gfronze@cern.ch>, 2019
-#
-# PY3K COMPATIBLE
+# - Jaroslav Guenther <jaroslav.guenther@cern.ch>, 2019-2020
+# - Eli Chadwick <eli.chadwick@stfc.ac.uk>, 2020
+# - Patrick Austin <patrick.austin@stfc.ac.uk>, 2020
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020-2021
 
 from __future__ import print_function
 
+try:
+    import importlib
+    importlib.util.find_spec('')
+except AttributeError:
+    import imp
+
 import base64
+import copy
 import datetime
 import errno
+import functools
 import getpass
 import hashlib
-import imp
 import json
+import logging
 import os
 import os.path
 import re
-import requests
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import zlib
-
-from logging import getLogger, Formatter
+from enum import Enum
+from logging import getLogger, Formatter  # NOQA: F401
 from logging.handlers import RotatingFileHandler
 from uuid import uuid4 as uuid
-from six import string_types, PY3
 from xml.etree import ElementTree
+
+import requests
+from six import string_types, text_type, PY3
+
+from rucio.common.config import config_get
+from rucio.common.exception import MissingModuleException, InvalidType, InputValidationError, MetalinkJsonParsingError, RucioException
+from rucio.common.types import InternalAccount, InternalScope
 
 try:
     # Python 2
@@ -80,41 +98,27 @@ except ImportError:
     # Python 3
     import urllib.parse as urlparse
 
-from rucio.common.config import config_get
-from rucio.common.exception import MissingModuleException, InvalidType, InputValidationError, MetalinkJsonParsingError
-from rucio.common.types import InternalAccount, InternalScope
-# delay import until function to avoid circular dependancy (note here for reference)
-# from rucio.core.rse import get_rse_name
-
 # Extra modules: Only imported if available
-EXTRA_MODULES = {'web': False,
-                 'paramiko': False,
-                 'flask': False}
-
-try:
-    from rucio.db.sqla.enum import EnumSymbol
-    EXTRA_MODULES['rucio.db.sqla.enum'] = True
-except ImportError:
-    EXTRA_MODULES['rucio.db.sqla.enum'] = False
+EXTRA_MODULES = {'paramiko': False}
 
 for extra_module in EXTRA_MODULES:
-    try:
-        imp.find_module(extra_module)
-        EXTRA_MODULES[extra_module] = True
-    except ImportError:
-        EXTRA_MODULES[extra_module] = False
-
-if EXTRA_MODULES['web']:
-    from web import HTTPError
+    if 'imp' in sys.modules:
+        try:
+            imp.find_module(extra_module)
+            EXTRA_MODULES[extra_module] = True
+        except ImportError:
+            EXTRA_MODULES[extra_module] = False
+    else:
+        if importlib.util.find_spec(extra_module):
+            EXTRA_MODULES[extra_module] = True
+        else:
+            EXTRA_MODULES[extra_module] = False
 
 if EXTRA_MODULES['paramiko']:
     try:
         from paramiko import RSAKey
     except Exception:
         EXTRA_MODULES['paramiko'] = False
-
-if EXTRA_MODULES['flask']:
-    from flask import Response
 
 # HTTP code dictionary. Not complete. Can be extended if needed.
 codes = {
@@ -154,9 +158,8 @@ def build_url(url, path=None, params=None, doseq=False):
     separated by '&' are generated for each element of the value sequence for the key.
     """
     complete_url = url
-    complete_url += "/"
     if path is not None:
-        complete_url += path
+        complete_url += "/" + path
     if params is not None:
         complete_url += "?"
         if isinstance(params, str):
@@ -166,19 +169,97 @@ def build_url(url, path=None, params=None, doseq=False):
     return complete_url
 
 
+def oidc_identity_string(sub, iss):
+    """
+    Transform IdP sub claim and issuers url into users identity string.
+    :param sub: users SUB claim from the Identity Provider
+    :param iss: issuer (IdP) https url
+
+    :returns: OIDC identity string "SUB=<usersid>, ISS=https://iam-test.ch/"
+    """
+    return 'SUB=' + str(sub) + ', ISS=' + str(iss)
+
+
+def sqlalchemy_obj_to_dict(sqlalchemyresult):
+    """
+    Makes dictionary from SQLAlchemy query result object
+    :param sqlalchemyresult:
+    :returns: dictionary
+    """
+    res_dict = copy.deepcopy(dict(sqlalchemyresult.__dict__))
+    del res_dict['_sa_instance_state']
+    return res_dict
+
+
+def all_oidc_req_claims_present(scope, audience, required_scope, required_audience, sepatator=" "):
+    """
+    Checks if both of the following statements are true:
+    - all items in required_scope are present in scope string
+    - all items in required_audience are present in audience
+    returns false otherwise. audience and scope must be both strings
+    or both lists. Similarly for required_* variables.
+    If this condition is satisfied, False is returned.
+    :params scope: list of strings or one string where items are separated by a separator input variable
+    :params audience: list of strings or one string where items are separated by a separator input variable
+    :params required_scope: list of strings or one string where items are separated by a separator input variable
+    :params required_audience: list of strings or one string where items are separated by a separator input variable
+    :params sepatator: separator string, space by default
+    :returns : True or False
+    """
+    if not scope:
+        scope = ""
+    if not audience:
+        audience = ""
+    if not required_scope:
+        required_scope = ""
+    if not required_audience:
+        required_audience = ""
+    if (isinstance(scope, list) and isinstance(audience, list) and  # NOQA: W504
+        isinstance(required_scope, list) and isinstance(required_audience, list)):
+        scope = [str(it) for it in scope]
+        audience = [str(it) for it in audience]
+        required_scope = [str(it) for it in required_scope]
+        required_audience = [str(it) for it in required_audience]
+        req_scope_present = all(elem in scope for elem in required_scope)
+        req_audience_present = all(elem in audience for elem in required_audience)
+        return req_scope_present and req_audience_present
+    elif (isinstance(scope, string_types) and isinstance(audience, string_types) and  # NOQA: W504
+          isinstance(required_scope, string_types) and isinstance(required_audience, string_types)):
+        scope = str(scope)
+        audience = str(audience)
+        required_scope = str(required_scope)
+        required_audience = str(required_audience)
+        req_scope_present = all(elem in scope.split(sepatator) for elem in required_scope.split(sepatator))
+        req_audience_present = all(elem in audience.split(sepatator) for elem in required_audience.split(sepatator))
+        return req_scope_present and req_audience_present
+    elif (isinstance(scope, list) and isinstance(audience, list) and  # NOQA: W504
+          isinstance(required_scope, string_types) and isinstance(required_audience, string_types)):
+        scope = [str(it) for it in scope]
+        audience = [str(it) for it in audience]
+        required_scope = str(required_scope)
+        required_audience = str(required_audience)
+        req_scope_present = all(elem in scope for elem in required_scope.split(sepatator))
+        req_audience_present = all(elem in audience for elem in required_audience.split(sepatator))
+        return req_scope_present and req_audience_present
+    elif (isinstance(scope, string_types) and isinstance(audience, string_types) and  # NOQA: W504
+          isinstance(required_scope, list) and isinstance(required_audience, list)):
+        scope = str(scope)
+        audience = str(audience)
+        required_scope = [str(it) for it in required_scope]
+        required_audience = [str(it) for it in required_audience]
+        req_scope_present = all(elem in scope.split(sepatator) for elem in required_scope)
+        req_audience_present = all(elem in audience.split(sepatator) for elem in required_audience)
+        return req_scope_present and req_audience_present
+    else:
+        return False
+
+
 def generate_uuid():
     return str(uuid()).replace('-', '').lower()
 
 
 def generate_uuid_bytes():
     return uuid().bytes
-
-
-def clean_headers(msg):
-    invalid_characters = ['\n', '\r']
-    for c in invalid_characters:
-        msg = str(msg).replace(c, ' ')
-    return msg
 
 
 # GLOBALLY_SUPPORTED_CHECKSUMS = ['adler32', 'md5', 'sha256', 'crc32']
@@ -297,6 +378,21 @@ def str_to_date(string):
     return datetime.datetime.strptime(string, DATE_FORMAT) if string else None
 
 
+def val_to_space_sep_str(vallist):
+    """ Converts a list of values into a string of space separated values
+
+    :param vallist: the list of values to to convert into string
+    :return: the string of space separated values or the value initially passed as parameter
+    """
+    try:
+        if isinstance(vallist, list):
+            return text_type(" ".join(vallist))
+        else:
+            return text_type(vallist)
+    except:
+        return text_type('')
+
+
 def date_to_str(date):
     """ Converts a datetime value to the corresponding RFC-1123 string.
 
@@ -319,8 +415,8 @@ class APIEncoder(json.JSONEncoder):
             return obj.isoformat()
         elif isinstance(obj, datetime.timedelta):
             return obj.days * 24 * 60 * 60 + obj.seconds
-        elif isinstance(obj, EnumSymbol):
-            return obj.description
+        elif isinstance(obj, Enum):
+            return obj.name
         elif isinstance(obj, (InternalAccount, InternalScope)):
             return obj.external
         return json.JSONEncoder.default(self, obj)
@@ -363,54 +459,6 @@ def parse_response(data):
     return json.loads(ret_obj, object_hook=datetime_parser)
 
 
-def generate_http_error(status_code, exc_cls, exc_msg):
-    """
-    utitily function to generate a complete HTTP error response.
-    :param status_code: The HTTP status code to generate a response for.
-    :param exc_cls: The name of the exception class to send with the response.
-    :param exc_msg: The error message.
-    :returns: a web.py HTTP response object.
-    """
-    status = codes[status_code]
-    data = {'ExceptionClass': exc_cls,
-            'ExceptionMessage': exc_msg}
-    # Truncate too long exc_msg
-    if len(str(exc_msg)) > 15000:
-        exc_msg = str(exc_msg)[:15000]
-    headers = {'Content-Type': 'application/octet-stream',
-               'ExceptionClass': exc_cls,
-               'ExceptionMessage': clean_headers(exc_msg)}
-    try:
-        return HTTPError(status, headers=headers, data=render_json(**data))
-    except Exception:
-        print({'Content-Type': 'application/octet-stream', 'ExceptionClass': exc_cls, 'ExceptionMessage': str(exc_msg).strip()})
-        raise
-
-
-def generate_http_error_flask(status_code, exc_cls, exc_msg):
-    """
-    utitily function to generate a complete HTTP error response.
-    :param status_code: The HTTP status code to generate a response for.
-    :param exc_cls: The name of the exception class to send with the response.
-    :param exc_msg: The error message.
-    :returns: a web.py HTTP response object.
-    """
-    data = {'ExceptionClass': exc_cls,
-            'ExceptionMessage': exc_msg}
-    # Truncate too long exc_msg
-    if len(str(exc_msg)) > 15000:
-        exc_msg = str(exc_msg)[:15000]
-    resp = Response(response=render_json(**data), status=status_code, content_type='application/octet-stream')
-    resp.headers['ExceptionClass'] = exc_cls
-    resp.headers['ExceptionMessage'] = clean_headers(exc_msg)
-
-    try:
-        return resp
-    except Exception:
-        print({'Content-Type': 'application/octet-stream', 'ExceptionClass': exc_cls, 'ExceptionMessage': str(exc_msg).strip()})
-        raise
-
-
 def execute(cmd, blocking=True):
     """
     Executes a command in a subprocess. Returns a tuple
@@ -426,15 +474,12 @@ def execute(cmd, blocking=True):
                                stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE)
-    out = ''
-    err = ''
-    exitcode = 0
 
     if blocking:
         result = process.communicate()
         (out, err) = result
         exitcode = process.returncode
-        return exitcode, out, err
+        return exitcode, out.decode(), err.decode()
     return process
 
 
@@ -476,9 +521,9 @@ def my_key_generator(namespace, fn, **kw):
 
 
 def get_logger(name):
-    logger = getLogger(name)
+    logger = logging.getLogger(name)
     hdlr = RotatingFileHandler('%s/%s.log' % (config_get('common', 'logdir'), name), maxBytes=1000000000, backupCount=10)
-    formatter = Formatter('%(asctime)s\t%(process)d\t%(levelname)s\t%(message)s')
+    formatter = logging.Formatter('%(asctime)s\t%(process)d\t%(levelname)s\t%(message)s')
     hdlr.setFormatter(formatter)
     logger.addHandler(hdlr)
     logger.setLevel(config_get('common', 'loglevel').upper())
@@ -561,15 +606,28 @@ def construct_surl_BelleII(dsn, filename):
         return '%s/%s' % (dsn, filename)
 
 
-def construct_surl(dsn, filename, naming_convention=None):
-    if naming_convention == 'T0':
-        return construct_surl_T0(dsn, filename)
-    elif naming_convention == 'DQ2':
-        return construct_surl_DQ2(dsn, filename)
-    elif naming_convention == 'BelleII':
-        return construct_surl_BelleII(dsn, filename)
+_SURL_ALGORITHMS = {}
+_DEFAULT_SURL = 'DQ2'
 
-    return construct_surl_DQ2(dsn, filename)
+
+def register_surl_algorithm(surl_callable, name=None):
+    if name is None:
+        name = surl_callable.__name__
+    _SURL_ALGORITHMS[name] = surl_callable
+
+
+register_surl_algorithm(construct_surl_T0, 'T0')
+register_surl_algorithm(construct_surl_DQ2, 'DQ2')
+register_surl_algorithm(construct_surl_BelleII, 'BelleII')
+
+
+def construct_surl(dsn, filename, naming_convention=None):
+    # ensure that policy package is loaded in case it registers its own algorithms
+    import rucio.common.schema  # noqa: F401
+
+    if naming_convention is None or naming_convention not in _SURL_ALGORITHMS:
+        naming_convention = _DEFAULT_SURL
+    return _SURL_ALGORITHMS[naming_convention](dsn, filename)
 
 
 def __strip_dsn(dsn):
@@ -616,9 +674,123 @@ def clean_surls(surls):
             surl = re.sub('/srm/managerv1\?SFN=', '', surl)  # NOQA: W605
             surl = re.sub('/srm/v2/server\?SFN=', '', surl)  # NOQA: W605
             surl = re.sub('/srm/managerv2\?SFN=', '', surl)  # NOQA: W605
+        if surl.startswith('https://storage.googleapis.com'):
+            surl = surl.split('?GoogleAccessId')[0]
+        if '?X-Amz' in surl:
+            surl = surl.split('?X-Amz')[0]
         res.append(surl)
     res.sort()
     return res
+
+
+_EXTRACT_SCOPE_ALGORITHMS = {}
+_DEFAULT_EXTRACT = 'atlas'
+
+
+def extract_scope_atlas(did, scopes):
+    # Try to extract the scope from the DSN
+    if did.find(':') > -1:
+        if len(did.split(':')) > 2:
+            raise RucioException('Too many colons. Cannot extract scope and name')
+        scope, name = did.split(':')[0], did.split(':')[1]
+        if name.endswith('/'):
+            name = name[:-1]
+        return scope, name
+    else:
+        scope = did.split('.')[0]
+        if did.startswith('user') or did.startswith('group'):
+            scope = ".".join(did.split('.')[0:2])
+        if did.endswith('/'):
+            did = did[:-1]
+        return scope, did
+
+
+def extract_scope_belleii(did, scopes):
+    split_did = did.split('/')
+    if did.startswith('/belle/MC/'):
+        if did.startswith('/belle/MC/BG') or \
+           did.startswith('/belle/MC/build') or \
+           did.startswith('/belle/MC/generic') or \
+           did.startswith('/belle/MC/log') or \
+           did.startswith('/belle/MC/mcprod') or \
+           did.startswith('/belle/MC/prerelease') or \
+           did.startswith('/belle/MC/release'):
+            return 'mc', did
+        if did.startswith('/belle/MC/cert') or \
+           did.startswith('/belle/MC/dirac') or \
+           did.startswith('/belle/MC/dr3') or \
+           did.startswith('/belle/MC/fab') or \
+           did.startswith('/belle/MC/hideki') or \
+           did.startswith('/belle/MC/merge') or \
+           did.startswith('/belle/MC/migration') or \
+           did.startswith('/belle/MC/skim') or \
+           did.startswith('/belle/MC/test'):
+            return 'mc_tmp', did
+        if len(split_did) > 4:
+            if split_did[3].find('fab') > -1 or split_did[3].find('merge') > -1 or split_did[3].find('skim') > -1:
+                return 'mc_tmp', did
+            if split_did[3].find('release') > -1:
+                return 'mc', did
+        return 'mc_tmp', did
+    if did.startswith('/belle/Raw/'):
+        return 'raw', did
+    if did.startswith('/belle/hRaw'):
+        return 'hraw', did
+    if did.startswith('/belle/user/'):
+        if len(split_did) > 4:
+            if len(split_did[3]) == 1 and 'user.%s' % (split_did[4]) in scopes:
+                return 'user.%s' % split_did[4], did
+        if len(split_did) > 3:
+            if 'user.%s' % (split_did[3]) in scopes:
+                return 'user.%s' % split_did[3], did
+        return 'user', did
+    if did.startswith('/belle/group/'):
+        if len(split_did) > 4:
+            if 'group.%s' % (split_did[4]) in scopes:
+                return 'group.%s' % split_did[4], did
+        return 'group', did
+    if did.startswith('/belle/data/') or did.startswith('/belle/Data/'):
+        if len(split_did) > 4:
+            if split_did[3] in ['fab', 'skim']:  # /belle/Data/fab --> data_tmp
+                return 'data_tmp', did
+            if split_did[3].find('release') > -1:  # /belle/Data/release --> data
+                return 'data', did
+        if len(split_did) > 5:
+            if split_did[3] in ['proc']:  # /belle/Data/proc
+                if split_did[4].find('release') > -1:  # /belle/Data/proc/release*
+                    if len(split_did) > 7 and split_did[6] in ['GCR2c', 'prod00000007', 'prod6b', 'proc7b',
+                                                               'proc8b', 'Bucket4', 'Bucket6test', 'bucket6',
+                                                               'proc9', 'bucket7', 'SKIMDATAx1', 'proc10Valid',
+                                                               'proc10', 'SkimP10x1', 'SkimP11x1', 'SkimB9x1',
+                                                               'SkimB10x1', 'SkimB11x1']:  # /belle/Data/proc/release*/*/proc10/* --> data_tmp (Old convention)
+                        return 'data_tmp', did
+                    else:  # /belle/Data/proc/release*/*/proc11/* --> data (New convention)
+                        return 'data', did
+                if split_did[4].find('fab') > -1:  # /belle/Data/proc/fab* --> data_tmp
+                    return 'data_tmp', did
+        return 'data_tmp', did
+    if did.startswith('/belle/ddm/functional_tests/') or did.startswith('/belle/ddm/tests/') or did.startswith('/belle/test/ddm_test'):
+        return 'test', did
+    if did.startswith('/belle/BG/'):
+        return 'data', did
+    return 'other', did
+
+
+def register_extract_scope_algorithm(extract_callable, name=[]):
+    if name is None:
+        name = extract_callable.__name__
+    _EXTRACT_SCOPE_ALGORITHMS[name] = extract_callable
+
+
+register_extract_scope_algorithm(extract_scope_atlas, 'atlas')
+register_extract_scope_algorithm(extract_scope_belleii, 'belleii')
+
+
+def extract_scope(did, scopes=None):
+    extract_scope_convention = config_get('common', 'extract_scope', False, None)
+    if extract_scope_convention is None or extract_scope_convention not in _EXTRACT_SCOPE_ALGORITHMS:
+        extract_scope_convention = _DEFAULT_EXTRACT
+    return _EXTRACT_SCOPE_ALGORITHMS[extract_scope_convention](did=did, scopes=scopes)
 
 
 def pid_exists(pid):
@@ -1098,20 +1270,23 @@ def api_update_return_dict(dictionary):
 
     copied = False  # Avoid side effects from pass by object
 
-    if 'rse_id' in dictionary.keys():
-        if 'rse' not in dictionary.keys():
-            if not copied:
-                dictionary = dictionary.copy()
-                copied = True
+    for rse_str in ['rse', 'src_rse', 'source_rse', 'dest_rse', 'destination_rse']:
+        rse_id_str = '%s_id' % rse_str
+        if rse_id_str in dictionary.keys() and dictionary[rse_id_str] is not None:
+            if rse_str not in dictionary.keys():
+                if not copied:
+                    dictionary = dictionary.copy()
+                    copied = True
+                import rucio.core.rse
+                dictionary[rse_str] = rucio.core.rse.get_rse_name(rse_id=dictionary[rse_id_str])
 
-            import rucio.core.rse
-            dictionary['rse'] = rucio.core.rse.get_rse_name(rse_id=dictionary['rse_id'])
-    if 'account' in dictionary.keys():
+    if 'account' in dictionary.keys() and dictionary['account'] is not None:
         if not copied:
             dictionary = dictionary.copy()
             copied = True
         dictionary['account'] = dictionary['account'].external
-    if 'scope' in dictionary.keys():
+
+    if 'scope' in dictionary.keys() and dictionary['scope'] is not None:
         if not copied:
             dictionary = dictionary.copy()
             copied = True
@@ -1137,3 +1312,155 @@ def get_parsed_throttler_mode(throttler_mode):
         direction = 'source'
         all_activities = True
     return (direction, all_activities)
+
+
+def query_bunches(query, bunch_by):
+    """
+    Queries output by yield_per sqlalchemy function
+    (which in a for loop returns rows one by one).
+    Groups the query rows in bunches of bunch_by
+    elements and returns list of bunches.
+    :param query: sqlalchemy session query
+    :param bunch_by: integer number
+    :returns: [[bunch_of_tuples_1],[bunch_of_tuples_2],...]
+
+    """
+    filtered_bunches = []
+    item_bunch = []
+    for i in query.yield_per(bunch_by):
+        # i is either tuple of one element (token/model object etc.)
+        if not isinstance(i, tuple) and not isinstance(i, list):
+            item_bunch.append(i)
+        # or i is a tuple with the column elements per row
+        else:
+            item_bunch += i
+        if len(item_bunch) % bunch_by == 0:
+            filtered_bunches.append(item_bunch)
+            item_bunch = []
+    if item_bunch:
+        filtered_bunches.append(item_bunch)
+    return filtered_bunches
+
+
+def setup_logger(module_name=None, logger_name=None, logger_level=None, verbose=False):
+    '''
+    Factory method to set logger with handlers.
+    :param module_name: __name__ of the module that is calling this method
+    :param logger_name: name of the logger, typically name of the module.
+    :param logger_level: if not given, fetched from config.
+    :param verbose: verbose option set in bin/rucio
+    '''
+    # helper method for cfg check
+    def _force_cfg_log_level(cfg_option):
+        cfg_forced_modules = config_get('logging', cfg_option, raise_exception=False, default=None, clean_cached=True)
+        if cfg_forced_modules:
+            if re.match(str(cfg_forced_modules), module_name):
+                return True
+        return False
+
+    # creating log
+    if not logger_name:
+        if not module_name:
+            logger_name = 'usr'
+        else:
+            logger_name = module_name.split('.')[-1]
+    logger = logging.getLogger(logger_name)
+
+    # extracting the log level
+    if not logger_level:
+        logger_level = logging.WARNING
+        if verbose:
+            logger_level = logging.DEBUG
+
+        # overriding by the config
+        cfg_levels = (logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR)
+        for level in cfg_levels:
+            cfg_opt = 'forceloglevel' + logging.getLevelName(level)
+            if _force_cfg_log_level(cfg_opt):
+                logger_level = level
+
+    # setting the log level
+    logger.setLevel(logger_level)
+
+    # preferred logger handling
+    def add_handler(logger):
+        hdlr = logging.StreamHandler()
+
+        def emit_decorator(fnc):
+            def func(*args):
+                if 'RUCIO_LOGGING_FORMAT' not in os.environ:
+                    levelno = args[0].levelno
+                    format_str = '%(asctime)s\t%(levelname)s\t%(message)s\033[0m'
+                    if levelno >= logging.CRITICAL:
+                        color = '\033[31;1m'
+                    elif levelno >= logging.ERROR:
+                        color = '\033[31;1m'
+                    elif levelno >= logging.WARNING:
+                        color = '\033[33;1m'
+                    elif levelno >= logging.INFO:
+                        color = '\033[32;1m'
+                    elif levelno >= logging.DEBUG:
+                        color = '\033[36;1m'
+                        format_str = '%(asctime)s\t%(levelname)s\t%(filename)s\t%(message)s\033[0m'
+                    else:
+                        color = '\033[0m'
+                    formatter = logging.Formatter('{0}{1}'.format(color, format_str))
+                else:
+                    formatter = logging.Formatter(os.environ['RUCIO_LOGGING_FORMAT'])
+                hdlr.setFormatter(formatter)
+                return fnc(*args)
+            return func
+        hdlr.emit = emit_decorator(hdlr.emit)
+        logger.addHandler(hdlr)
+
+    # setting handler and formatter
+    if not logger.handlers:
+        add_handler(logger)
+
+    return logger
+
+
+class retry:
+    """Retry callable object with configuragle number of attempts"""
+
+    def __init__(self, func, *args, **kwargs):
+        '''
+        :param func: a method that should be executed with retries
+        :param args parametres of the func
+        :param kwargs: key word arguments of the func
+        '''
+        self.func, self.args, self.kwargs = func, args, kwargs
+
+    def __call__(self, mtries=3, logger=None):
+        '''
+        :param mtries: maximum number of attempts to execute the function
+        :param logger: preferred logger
+        '''
+        attempt = mtries
+        while attempt > 1:
+            try:
+                if logger:
+                    logger.debug('{}: Attempt {}'.format(self.func.__name__, mtries - attempt + 1))
+                return self.func(*self.args, **self.kwargs)
+            except Exception as e:
+                if logger:
+                    logger.debug('{}: Attempt failed {}'.format(self.func.__name__, mtries - attempt + 1))
+                    logger.debug(str(e))
+                attempt -= 1
+        return self.func(*self.args, **self.kwargs)
+
+
+def formatted_logger(innerfunc, formatstr="%s"):
+    """
+    Decorates the passed function, formatting log input by
+    the passed formatstr. The format string must always include a %s.
+
+    :param innerfunc: function to be decorated. Must take (level, msg) arguments.
+    :type innerfunc: Callable
+    :param formatstr: format string with %s as placeholder.
+    :type formatstr: str
+    """
+    @functools.wraps(innerfunc)
+    def log_format(level, msg, *args, **kwargs):
+        return innerfunc(level, formatstr % msg, *args, **kwargs)
+    return log_format

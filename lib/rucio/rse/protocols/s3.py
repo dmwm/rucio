@@ -11,6 +11,7 @@
  - Mario Lassnig, <mario.lassnig@cern.ch>, 2017
  - Nicolo Magini, <nicolo.magini@cern.ch>, 2018
  - Hannes Hansen, <hannes.jakob.hansen@cern.ch>, 2019
+ - Eli Chadwick, <eli.chadwick@stfc.ac.uk>, 2020
 
  PY3K COMPATIBLE
 '''
@@ -36,8 +37,8 @@ from rucio.rse.protocols import protocol
 class Default(protocol.RSEProtocol):
     """ Implementing access to RSEs using the S3 protocol."""
 
-    def __init__(self, protocol_attr, rse_settings):
-        super(Default, self).__init__(protocol_attr, rse_settings)
+    def __init__(self, protocol_attr, rse_settings, logger=None):
+        super(Default, self).__init__(protocol_attr, rse_settings, logger=logger)
         if 'determinism_type' in self.attributes:
             self.attributes['determinism_type'] = 's3'
 
@@ -68,7 +69,7 @@ class Default(protocol.RSEProtocol):
         pfns = {}
         lfns = [lfns] if type(lfns) == dict else lfns
         for lfn in lfns:
-            scope, name = str(lfn['scope']), lfn['name']
+            scope, name = lfn['scope'], lfn['name']
             pfns['%s:%s' % (scope, name)] = ''.join([self.attributes['scheme'], '://', self._get_path(scope=scope, name=name)])
         return pfns
 

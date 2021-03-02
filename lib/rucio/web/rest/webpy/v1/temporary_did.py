@@ -1,5 +1,6 @@
-#!/usr/bin/env python
-# Copyright 2012-2018 CERN for the benefit of the ATLAS collaboration.
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Copyright 2016-2020 CERN
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,21 +16,23 @@
 #
 # Authors:
 # - Vincent Garonne <vincent.garonne@cern.ch>, 2016
+# - Thomas Beermann <thomas.beermann@cern.ch>, 2018-2020
 # - Mario Lassnig <mario.lassnig@cern.ch>, 2018
 # - Hannes Hansen <hannes.jakob.hansen@cern.ch>, 2018
-#
-# PY3K COMPATIBLE
+# - Andrew Lister <andrew.lister@stfc.ac.uk>, 2019
+# - Benedikt Ziemons <benedikt.ziemons@cern.ch>, 2020
 
 from __future__ import print_function
+
 from json import loads
 from traceback import format_exc
+
 from web import application, ctx, data, Created, InternalError, loadhook
 
 from rucio.api.temporary_did import (add_temporary_dids)
 from rucio.common.exception import RucioException
-from rucio.common.utils import generate_http_error
-
 from rucio.web.rest.common import rucio_loadhook, RucioController
+from rucio.web.rest.utils import generate_http_error
 
 URLS = ('', 'BulkDIDS',)
 
@@ -44,7 +47,7 @@ class BulkDIDS(RucioController):
             raise generate_http_error(400, 'ValueError', 'Cannot decode json parameter list')
 
         try:
-            add_temporary_dids(dids=dids, issuer=ctx.env.get('issuer'))
+            add_temporary_dids(dids=dids, issuer=ctx.env.get('issuer'), vo=ctx.env.get('vo'))
         except RucioException as error:
             raise generate_http_error(500, error.__class__.__name__, error.args[0])
         except Exception as error:
@@ -65,4 +68,5 @@ class Compose(RucioController):
 
 APP = application(URLS, globals())
 APP.add_processor(loadhook(rucio_loadhook))
-application = APP.wsgifunc()
+if __name__ != "rucio.web.rest.temporary_did":
+    application = APP.wsgifunc()
